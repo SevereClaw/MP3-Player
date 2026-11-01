@@ -30,7 +30,16 @@ jobs:
           python -m pip install -r requirements.txt pyinstaller
 
       - name: Check that all modules import
-        run: python -c "import mp3player, skin_editor, lyrics, geom3d, radio, doulander_link, media_keys, panels, stats, spectrum, audio_engine, desktop_keeper, winassoc"
+        run: python -c "import mp3player, skin_editor, lyrics, geom3d, radio, doulander_link, updater, media_keys, panels, stats, spectrum, audio_engine, desktop_keeper, winassoc"
+
+      - name: Updater self-test (replaces files like a real update)
+        run: |
+          python tests/test_updater.py start
+          python tests/test_updater.py check
+
+      - name: Stamp build number (for auto-update)
+        shell: pwsh
+        run: Set-Content -Path build_info.py -Value "BUILD = ${{ github.run_number }}" -Encoding ascii
 
       - name: Build (folder build - starts fast)
         run: >
@@ -39,6 +48,7 @@ jobs:
           --collect-all winrt
           --hidden-import mp3player --hidden-import skin_editor --hidden-import lyrics
           --hidden-import geom3d --hidden-import radio --hidden-import doulander_link
+          --hidden-import updater --hidden-import build_info
           launch.py
 
       - name: Smoke test - the exe starts and keeps running

@@ -9,10 +9,11 @@ import json
 import math
 import random
 import re
+import threading
 import time
 
 from PySide6.QtCore import (Qt, QTimer, QRect, QRectF, QPointF, QUrl, QStandardPaths,
-                            QLockFile, QPoint, QBuffer, QIODevice)
+                            QLockFile, QPoint, QBuffer, QIODevice, QObject, Signal)
 from PySide6.QtGui import (QPixmap, QPainter, QColor, QFont, QFontMetricsF, QTransform, QDesktopServices,
                            QPolygonF, QImage,
                            QIcon, QAction, QActionGroup, QPainterPath, QPen,
@@ -33,6 +34,7 @@ import geom3d
 from stats import Stats, fmt_dur
 import radio as radiomod
 import doulander_link as dlmod
+import updater
 
 APP_NAME = "MP3Player"
 APP_TITLE = "MP3 Плеер"
@@ -604,6 +606,14 @@ class MiniBar(QWidget):
         self.update()
 
 
+UPDATE_REPO = "SevereClaw/MP3-Player"
+UPDATE_ASSET = "MP3Player.zip"
+
+
+class UpdateSignals(QObject):
+    event = Signal(str, object)          # ("found"/"progress"/"ready"/"latest"/"error", данные)
+
+
 class Mp3Widget(QWidget):
     def __init__(self, settings_path, skip_restore=False):
         super().__init__()
@@ -677,6 +687,16 @@ class Mp3Widget(QWidget):
         self.dl.progress.connect(self.on_dl_progress)
         self.dl.finished.connect(self.on_dl_finished)
         self.dl_pct, self.dl_title, self._dl_flash = None, "", -100
+        # автообновление из релизов GitHub
+        self.build = updater.current_build()
+        self.upd = UpdateSignals(self)
+        self.upd.event.connect(self.on_update_event)
+        self.upd_state, self.upd_ready, self.upd_manual = "", None, False
+        self.upd_idle_since = None
+        self.upd_timer = QTimer(self, interval=60 * 1000)        # раз в минуту: пора ли?
+        self.upd_timer.timeout.connect(self.update_tick)
+        self.upd_timer.start()
+        QTimer.singleShot(30 * 1000, self.update_tick)
         self._radio_retry = 0
         self._eq_real_since = None
         # статистика и итоги
@@ -1593,6 +1613,131 @@ class Mp3Widget(QWidget):
         if cur is not None and not self.shuffle:
             self.pos_in_order = self.order.index(cur)
         self.save_later()
+
+    # ------------------------------------------------------------ автообновление
+    def build_update_menu(self, um):
+        um.clear()
+        um.addAction(f"Сборка {self.build}" if self.build else "Запущено из исходников").setEnabled(False)
+        if self.upd_ready:
+            um.addAction(f"⬆  Установить сборку {self.upd_ready[1]} сейчас", lambda: self.install_update())
+        elif self.upd_state.startswith("downloading"):
+            um.addAction(f"Скачиваю сборку… {self.upd_state.split()[-1]}").setEnabled(False)
+        else:
+            um.addAction("Проверить сейчас", lambda: self.check_update(manual=True))
+        a = um.addAction("Обновляться автоматически", self.toggle_auto_update)
+        a.setCheckable(True)
+        a.setChecked(self.cfg.get("auto_update", True))
+        um.addAction("Все сборки на GitHub…",
+                     lambda: QDesktopServices.openUrl(QUrl(f"https://github.com/{UPDATE_REPO}/releases")))
+
+    def toggle_auto_update(self):
+        self.cfg["auto_update"] = not self.cfg.get("auto_update", True)
+        self.flash("АВТООБНОВЛЕНИЕ " + ("ВКЛ" if self.cfg["auto_update"] else "ВЫКЛ"))
+        self.save_later()
+
+    def update_tick(self):
+        # скачанная сборка ставится, когда музыка не играет хотя бы 2 минуты
+        if self.upd_ready and self.cfg.get("auto_update", True):
+            if self.is_playing() or self.__dict__.get("dl_pct") is not None:
+                self.upd_idle_since = None
+            else:
+                self.upd_idle_since = self.upd_idle_since or time.monotonic()
+                if time.monotonic() - self.upd_idle_since >= 120:
+                    self.install_update()
+                    return
+        if (updater.can_update() and self.cfg.get("auto_update", True) and not self.upd_ready
+                and updater.due(self.cfg.get("update_checked"), hours=6)):
+            self.check_update(manual=False)
+
+    def check_update(self, manual=False):
+        if not updater.can_update():
+            if manual:
+                QMessageBox.information(None, APP_TITLE, "Обновление работает в собранной программе "
+                                                         "из релизов GitHub.")
+            return
+        if self.upd_state in ("checking",) or self.upd_state.startswith("downloading"):
+            return
+        self.upd_state, self.upd_manual = "checking", manual
+        if manual:
+            self.flash("ПРОВЕРЯЮ ОБНОВЛЕНИЯ…")
+        threading.Thread(target=self._update_worker, args=(manual,), daemon=True).start()
+
+    def _update_worker(self, manual):
+        emit = self.upd.event.emit
+        try:
+            rel = updater.latest(UPDATE_REPO, UPDATE_ASSET)
+            self.cfg["update_checked"] = time.time()
+            if not rel or rel["build"] <= self.build:
+                emit("latest", None)
+                return
+            if not manual and not self.cfg.get("auto_update", True):
+                emit("idle", None)
+                return
+            emit("found", rel["build"])
+            work = updater.work_dir("MP3Player")
+            zpath = os.path.join(work, f"MP3Player-{rel['build']}.zip")
+            last = [-10]
+
+            def prog(p):
+                if p - last[0] >= 5:
+                    last[0] = p
+                    emit("progress", p)
+            updater.download(rel["url"], zpath, rel["size"], prog)
+            new_dir = updater.unpack_folder(zpath, "MP3Player", "MP3Player.exe")
+            try:
+                os.remove(zpath)
+            except OSError:
+                pass
+            emit("ready", (new_dir, rel["build"]))
+        except Exception as e:
+            emit("error", f"{type(e).__name__}: {e}")
+
+    def on_update_event(self, kind, data):
+        manual = self.upd_manual
+        if kind == "latest":
+            self.upd_state = ""
+            if manual:
+                self.flash(f"ПОСЛЕДНЯЯ СБОРКА: {self.build}", 2.5)
+        elif kind == "idle":
+            self.upd_state = ""
+        elif kind == "found":
+            self.upd_state = "downloading 0%"
+            if manual:
+                self.flash(f"⬆ СКАЧИВАЮ СБОРКУ {data}", 2.5)
+        elif kind == "progress":
+            self.upd_state = f"downloading {int(data)}%"
+        elif kind == "ready":
+            self.upd_state, self.upd_ready = "ready", data
+            if manual:
+                self.install_update()
+            elif hasattr(self, "tray"):
+                self.tray.showMessage(APP_TITLE, f"Скачана сборка {data[1]}. Поставлю, когда музыка "
+                                                 "не будет играть, или при выходе.",
+                                      QSystemTrayIcon.MessageIcon.Information, 6000)
+        elif kind == "error":
+            self.upd_state = ""
+            if manual:
+                QMessageBox.warning(None, APP_TITLE, f"Не удалось обновиться:\n{data}")
+
+    def install_update(self, restart=True):
+        if not self.upd_ready:
+            return False
+        new_dir, build = self.upd_ready
+        self.upd_ready = None
+        try:
+            self.remember_position()
+            self.remember_folder_state()
+            self.save_cfg()
+            updater.apply_folder(new_dir, "MP3Player", "MP3Player.exe",
+                                 restart_args=["--updated"], restart=restart)
+        except Exception as e:
+            QMessageBox.warning(None, APP_TITLE, f"Не удалось обновиться:\n{e}")
+            return False
+        if restart:
+            self.flash(f"⬆ ОБНОВЛЯЮСЬ ДО {build}…", 3.0)
+            self.bye_t0 = time.monotonic()             # без прощальной анимации — сразу
+            QTimer.singleShot(400, self._quit_now)
+        return True
 
     def build_radio_menu(self):
         m = self.radio_menu
@@ -3389,6 +3534,8 @@ class Mp3Widget(QWidget):
         dd = self.doulander_dir(ask=False)
         dlm.addAction(("Doulander: " + dd) if dd else "Где Doulander?…", self.choose_doulander)
         m.addAction("📜  Плейлист", self.open_playlist)
+        um = m.addMenu("⬆  Обновления")
+        um.aboutToShow.connect(lambda um=um: self.build_update_menu(um))
         m.addSeparator()
         self.act_play = m.addAction("⏯  Играть / Пауза", self.toggle_play)
         m.addAction("⏭  Следующий", lambda: self.step(+1))
@@ -4068,6 +4215,8 @@ class Mp3Widget(QWidget):
         self._quit_now()
 
     def _quit_now(self):
+        if self.upd_ready and self.cfg.get("auto_update", True):
+            self.install_update(restart=False)          # скачанная сборка — при выходе
         self.write_nowplaying(closing=True)
         self.keeper.close()
         self.mini_keeper.close()
@@ -4214,6 +4363,8 @@ def main():
         if w.on_desktop:
             WinDesktop.peek_topmost(w, 4500)
     QTimer.singleShot(200, first_show)
+    if "--updated" in sys.argv and w.build:
+        QTimer.singleShot(int(BOOT_LEN * 1000) + 600, lambda: w.flash(f"⬆ СБОРКА {w.build}", 3.0))
     app.aboutToQuit.connect(w.save_cfg)
     rc = app.exec()
     lock.unlock()

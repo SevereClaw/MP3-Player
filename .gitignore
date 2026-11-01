@@ -4,3 +4,4 @@ build/
 dist/
 *.spec
 MP3Player.zip
+build_info.py
