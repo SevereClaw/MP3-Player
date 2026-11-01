@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QMenu, QSystemTrayIcon,
 from PySide6.QtMultimedia import QMediaPlayer, QMediaMetaData, QSoundEffect
 
 from media_keys import SystemMedia, GlobalHotkeys, HOTKEYS, MEDIA_FALLBACK
-from panels import (PlaylistPanel, CoverPopup, NowPlayingToast, EqPanel, set_theme as panels_set_theme,
+from panels import (PlaylistPanel, CoverPopup, NowPlayingToast, EqPanel, WhatsNewPanel, set_theme as panels_set_theme,
                     display_name)
 import eq as eqmod
 from audio_engine import AudioEngine
@@ -721,6 +721,8 @@ class Mp3Widget(QWidget):
         self.upd_timer.timeout.connect(self.update_tick)
         self.upd_timer.start()
         QTimer.singleShot(30 * 1000, self.update_tick)
+        self.news_panel = None
+        QTimer.singleShot(int(BOOT_LEN * 1000) + 2500, self.check_whats_new)
         # тексты из интернета (lrclib.net)
         self.lyr_sig = LyricsSignals(self)
         self.lyr_sig.done.connect(self.on_lyrics_online)
@@ -1661,8 +1663,31 @@ class Mp3Widget(QWidget):
         a = um.addAction("Обновляться автоматически", self.toggle_auto_update)
         a.setCheckable(True)
         a.setChecked(self.cfg.get("auto_update", True))
+        um.addAction("Что нового в последних сборках", lambda: self.show_whats_new(max(0, self.build - 5),
+                                                                                 manual=True))
         um.addAction("Все сборки на GitHub…",
                      lambda: QDesktopServices.openUrl(QUrl(f"https://github.com/{UPDATE_REPO}/releases")))
+
+    def check_whats_new(self):
+        """Обновились (сами или вручную) — показать, что изменилось с прошлой сборки."""
+        if not updater.can_update():
+            return
+        last = int(self.cfg.get("last_seen_build") or 0)
+        self.cfg["last_seen_build"] = self.build
+        self.save_later()
+        if 0 < last < self.build:
+            self.show_whats_new(last)
+
+    def show_whats_new(self, after, manual=False):
+        emit = self.upd.event.emit
+
+        def work():
+            try:
+                emit("notes", (updater.notes_since(UPDATE_REPO, after, self.build), manual))
+            except Exception as e:
+                if manual:
+                    emit("error", f"Не удалось загрузить список изменений: {e}")
+        threading.Thread(target=work, daemon=True).start()
 
     def toggle_auto_update(self):
         self.cfg["auto_update"] = not self.cfg.get("auto_update", True)
@@ -1748,6 +1773,18 @@ class Mp3Widget(QWidget):
                 self.tray.showMessage(APP_TITLE, f"Скачана сборка {data[1]}. Поставлю, когда музыка "
                                                  "не будет играть, или при выходе.",
                                       QSystemTrayIcon.MessageIcon.Information, 6000)
+        elif kind == "notes":
+            notes, manual = data
+            if not notes:
+                if manual:
+                    self.flash("СПИСОК ИЗМЕНЕНИЙ ПУСТ", 2.0)
+                return
+            if self.news_panel is None:
+                self.news_panel = WhatsNewPanel()
+            title = "ЧТО НОВОГО" if manual else f"ОБНОВЛЕНО ДО СБОРКИ {self.build}"
+            self.news_panel.show_notes(title, notes, self.visual_rect(),
+                                       f"https://github.com/{UPDATE_REPO}/releases")
+            return
         elif kind == "error":
             self.upd_state = ""
             if manual:

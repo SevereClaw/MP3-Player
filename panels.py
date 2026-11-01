@@ -736,3 +736,69 @@ class EqPanel(QWidget):
             self.hide()
         else:
             super().keyPressEvent(ev)
+
+
+# ===================================================================== Что нового
+class WhatsNewPanel(QWidget):
+    """Окошко со списком изменений после обновления."""
+    def __init__(self):
+        super().__init__(None, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint |
+                         Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.NoDropShadowWindowHint)
+        from PySide6.QtWidgets import QPushButton, QTextBrowser
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        frame = QFrame(self)
+        frame.setObjectName("panel")
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(frame)
+        lay = QVBoxLayout(frame)
+        lay.setContentsMargins(16, 12, 16, 12)
+        lay.setSpacing(8)
+        self.title = QLabel("ЧТО НОВОГО")
+        self.title.setObjectName("title")
+        lay.addWidget(self.title)
+        self.text = QTextBrowser()
+        self.text.setOpenExternalLinks(True)
+        lay.addWidget(self.text, 1)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        ok = QPushButton("Понятно")
+        ok.setObjectName("favbtn")
+        ok.setCursor(Qt.CursorShape.PointingHandCursor)
+        ok.clicked.connect(self.hide)
+        row.addWidget(ok)
+        lay.addLayout(row)
+        self.restyle()
+        self.resize(420, 320)
+        _live_panels.append(self)
+
+    def restyle(self):
+        self.setStyleSheet(f"""
+            #panel {{ background:{BG}; border:1px solid {BORDER}; border-radius:12px; }}
+            QLabel {{ color:{TEXT}; font-family:{FONTS}; }}
+            #title {{ font-size:15px; font-weight:bold; color:{LCD}; letter-spacing:2px; }}
+            QTextBrowser {{ background:transparent; border:none; color:{TEXT}; font-family:{FONTS};
+                            font-size:13px; }}
+            #favbtn {{ background:{LCD}; color:{LCD_INK}; border:none; border-radius:9px;
+                       padding:4px 14px; font-family:{FONTS}; font-size:12px; font-weight:bold; }}
+            QScrollBar:vertical {{ background:transparent; width:8px; margin:2px; }}
+            QScrollBar::handle:vertical {{ background:#4b5a60; border-radius:3px; min-height:24px; }}
+            QScrollBar::add-line, QScrollBar::sub-line {{ height:0; }}
+        """)
+
+    def show_notes(self, title, notes, anchor: QRect, link=""):
+        """notes: [(номер сборки, текст), …]"""
+        import html
+        self.title.setText(title)
+        parts = []
+        for build, text in notes:
+            items = [ln[1:].strip() if ln.startswith("•") else ln for ln in text.splitlines() if ln.strip()]
+            lis = "".join(f"<li>{html.escape(x)}</li>" for x in items) or "<li>Мелкие исправления</li>"
+            parts.append(f"<p style='color:{LCD};margin:6px 0 2px 0'><b>Сборка {build}</b></p>"
+                         f"<ul style='margin:0 0 0 -18px'>{lis}</ul>")
+        if link:
+            parts.append(f"<p><a style='color:{DIM}' href='{link}'>Все сборки на GitHub</a></p>")
+        self.text.setHtml("".join(parts))
+        self.move(place_beside(anchor, self.size(), prefer_left=False))
+        self.show()
+        self.raise_()
