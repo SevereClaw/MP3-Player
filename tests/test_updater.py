@@ -63,7 +63,7 @@ def check():
     for name in ("upd-test-folder", "upd-test-exe"):
         log = os.path.join(updater.work_dir(name), "apply.log")
         if os.path.isfile(log):
-            print(name, "log:\n" + open(log, encoding="utf-16", errors="replace").read())
+            print(name, "log:\n" + open(log, encoding="utf-8-sig", errors="replace").read())
     bad = [p for p, v in want.items() if not (os.path.isfile(p) and read(p) == v)]
     if bad:                                   # диагностика: запустить скрипт вручную и показать вывод
         import subprocess
@@ -71,9 +71,14 @@ def check():
             ps1 = os.path.join(updater.work_dir(name), "apply.ps1")
             print(name, "apply.ps1 exists:", os.path.isfile(ps1))
             if os.path.isfile(ps1):
-                r = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ps1],
-                                   capture_output=True, text=True, timeout=120)
-                print("rc", r.returncode, "\nstdout:", r.stdout[-2000:], "\nstderr:", r.stderr[-3000:])
+                body = open(ps1, encoding="utf-8-sig").read()
+                dbg = ps1[:-4] + "-debug.ps1"
+                with open(dbg, "w", encoding="utf-8-sig") as f:
+                    f.write(body)
+                r = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", dbg],
+                                   capture_output=True, timeout=120)
+                print("rc", r.returncode, "\nstdout:", r.stdout.decode("oem", "replace")[-3000:],
+                      "\nstderr:", r.stderr.decode("oem", "replace")[-3000:])
     if os.path.exists(os.path.join(APP, "_internal", "gone.dll")):
         bad.append("старый _internal не убран")
     if os.path.exists(os.path.join(APP, "_internal.old")):
