@@ -72,6 +72,9 @@ class Spectrum(QObject):
             return
         try:
             for d in engine.decks:
+                if hasattr(d.player, "audio_callback"):        # дека с эквалайзером — звук отдаёт сама
+                    d.player.audio_callback = lambda a, sr, d=d: self._on_samples(d, a, sr)
+                    continue
                 out = QAudioBufferOutput(self)
                 d.player.setAudioBufferOutput(out)
                 out.audioBufferReceived.connect(lambda buf, d=d: self._on_buffer(d, buf))
@@ -127,6 +130,23 @@ class Spectrum(QObject):
             self.bands = self._analyse(mono, sr)
             self.t_last = now
             self.count += 1
+        except Exception as e:
+            self.errors += 1
+            self.last_error = f"{type(e).__name__}: {e}"
+
+    def _on_samples(self, deck, mono, sr):
+        if deck is not self.engine.cur:
+            return
+        now = time.monotonic()
+        if now - self._last_calc < 0.03:
+            return
+        self._last_calc = now
+        try:
+            m = list(mono[-2048:]) if np is None else mono[-2048:]
+            if len(m) >= 256:
+                self.bands = self._analyse(m, sr)
+                self.t_last = now
+                self.count += 1
         except Exception as e:
             self.errors += 1
             self.last_error = f"{type(e).__name__}: {e}"

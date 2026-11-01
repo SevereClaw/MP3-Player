@@ -10,13 +10,27 @@ import time
 from PySide6.QtCore import QObject, Signal, QTimer, QUrl
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 
+import eq as eqmod
+try:
+    import dsp_player
+except Exception as _e:          # нет PyAV/numpy — эквалайзер недоступен, остальное работает
+    dsp_player = None
+    DSP_ERROR = f"{type(_e).__name__}: {_e}"
+else:
+    DSP_ERROR = dsp_player.AV_ERROR
+
 PS = QMediaPlayer.PlaybackState
 
 
 class _Deck:
-    def __init__(self, parent):
-        self.audio = QAudioOutput(parent)
-        self.player = QMediaPlayer(parent)
+    def __init__(self, parent, kind="qt", equalizer=None):
+        self.kind = kind
+        if kind == "dsp":                        # свой путь звука — с эквалайзером
+            self.audio = dsp_player.DspOutput(parent)
+            self.player = dsp_player.DspPlayer(equalizer, parent)
+        else:
+            self.audio = QAudioOutput(parent)
+            self.player = QMediaPlayer(parent)
         self.player.setAudioOutput(self.audio)
         self.x = 1.0            # уровень 0..1 (до кривой)
         self.target = 1.0
@@ -38,8 +52,18 @@ class AudioEngine(QObject):
     def __init__(self, parent=None, volume=0.6):
         super().__init__(parent)
         self.user_vol = float(volume)
-        self.decks = [_Deck(self), _Deck(self)]
-        self.active = 0
+        self.equalizer = eqmod.Equalizer()
+        self.qt_decks = [_Deck(self), _Deck(self)]
+        self.dsp_decks = []
+        self.dsp_error = DSP_ERROR if dsp_player is None or not dsp_player.available() else ""
+        if not self.dsp_error:
+            try:
+                self.dsp_decks = [_Deck(self, "dsp", self.equalizer), _Deck(self, "dsp", self.equalizer)]
+            except Exception as e:
+                self.dsp_error = f"{type(e).__name__}: {e}"
+        self.decks = self.qt_decks + self.dsp_decks
+        self._cur = self.qt_decks[0]
+        self.use_dsp = False                     # включает плеер, когда эквалайзер не «плоский»
         self.pausing = False
         self.near_ms = 0
         self._near_fired = False
@@ -76,7 +100,13 @@ class AudioEngine(QObject):
 
     @property
     def cur(self):
-        return self.decks[self.active]
+        return self._cur
+
+    def kind_for(self, url):
+        return "dsp" if (self.use_dsp and self.dsp_decks and url.isLocalFile()) else "qt"
+
+    def current_kind(self):
+        return self._cur.kind
 
     # ------------------------------------------------------------ как у QMediaPlayer
     def position(self):
@@ -132,9 +162,10 @@ class AudioEngine(QObject):
         was_playing = (old.player.playbackState() == PS.PlayingState) and not self.pausing
         self.pausing = False
         self._near_fired = False
+        pair = self.dsp_decks if self.kind_for(url) == "dsp" else self.qt_decks
         if autoplay and was_playing and fade_ms > 0:
             # кроссфейд: новая дека нарастает, старая затихает
-            self.active = 1 - self.active
+            self._cur = pair[1] if pair[0] is old else pair[0]
             new = self.cur
             new.on_done = None
             new.player.stop()
@@ -147,6 +178,11 @@ class AudioEngine(QObject):
             self._ramp(old, 0.0, fade_ms, on_done=lambda o=old: self._release(o))
             self.playbackStateChanged.emit(self.playbackState())
         else:
+            if old not in pair:                      # сменился путь звука — старую деку выключить
+                old.on_done = None
+                old.player.stop()
+                old.player.setSource(QUrl())
+                self._cur = pair[0]
             d = self.cur
             d.on_done = None
             d.gain = d.gain_target = max(0.05, min(1.0, float(gain)))
@@ -182,9 +218,9 @@ class AudioEngine(QObject):
         d = self.cur
         if d.player.playbackState() != PS.PlayingState or self.pausing:
             return
-        other = self.decks[1 - self.active]        # хвост прошлого трека при кроссфейде
-        if other.player.playbackState() == PS.PlayingState:
-            self._ramp(other, 0.0, max(1, fade_ms), on_done=lambda o=other: self._release(o))
+        for other in self.decks:                    # хвост прошлого трека при кроссфейде
+            if other is not d and other.player.playbackState() == PS.PlayingState:
+                self._ramp(other, 0.0, max(1, fade_ms), on_done=lambda o=other: self._release(o))
         if fade_ms <= 0:
             d.player.pause()
             return

@@ -23,8 +23,9 @@ from PySide6.QtWidgets import (QApplication, QWidget, QMenu, QSystemTrayIcon,
 from PySide6.QtMultimedia import QMediaPlayer, QMediaMetaData, QSoundEffect
 
 from media_keys import SystemMedia, GlobalHotkeys, HOTKEYS, MEDIA_FALLBACK
-from panels import (PlaylistPanel, CoverPopup, NowPlayingToast, set_theme as panels_set_theme,
+from panels import (PlaylistPanel, CoverPopup, NowPlayingToast, EqPanel, set_theme as panels_set_theme,
                     display_name)
+import eq as eqmod
 from audio_engine import AudioEngine
 from lyrics import load_for_track, load_file, INDEX as LRC_INDEX
 from spectrum import Spectrum
@@ -681,6 +682,14 @@ class Mp3Widget(QWidget):
 
         # аудио
         self.player = AudioEngine(self, volume=float(self.cfg.get("volume", 0.6)))
+        # эквалайзер звука: при «плоском» — обычный путь звука, иначе — свой (dsp_player)
+        self.player.equalizer.set(self.cfg.get("eq_gains") or eqmod.PRESETS["Плоский"],
+                                  bool(self.cfg.get("eq_on", False)))
+        self.player.use_dsp = self.player.equalizer.active() and bool(self.player.dsp_decks)
+        self.eq_panel = None
+        self.eq_apply_timer = QTimer(self, singleShot=True, interval=60)
+        self.eq_apply_timer.timeout.connect(self.apply_eq_now)
+        self._eq_pending = None
         # выравнивание громкости: меряем каждый файл один раз и запоминаем
         self.loud_cache = loudness.LoudnessCache(
             os.path.join(os.path.dirname(self.settings_path), "loudness.json"))
@@ -2239,6 +2248,8 @@ class Mp3Widget(QWidget):
                 self.show_player()
         elif cmd == "radio":
             self.leave_radio() if self.radio else self.play_radio()
+        elif cmd == "eq":
+            self.open_eq()
         elif cmd == "download":
             self.download_dialog()
         elif cmd == "mini":
@@ -2474,6 +2485,8 @@ class Mp3Widget(QWidget):
             ("СКИН", self.skin_meta.get("name", self.skin_id).upper(), self.cycle_skin),
             ("ПОДСВЕТКА", theme, cycle_theme),
             ("ЗВУК КНОПОК", onoff("click_sound"), lambda: self.toggle_cfg("click_sound", "ЗВУК КНОПОК")),
+            ("ЗВУК (EQ)", (self.cfg.get("eq_preset", "Плоский").upper()[:10]
+                           if self.player.equalizer.active() else "ВЫКЛ"), self.cycle_eq_preset),
             ("ЭКВАЛАЙЗЕР", ("ВЫКЛ" if not self.cfg.get("eq", True) else
                             "СПЕКТР" if self.eq_real_on() else "ДЕКОР"), self.cycle_eq),
             ("ГРОМК. ЗВУКОВ", next((k.upper() for k, v in SFX_LEVELS.items()
@@ -3201,7 +3214,8 @@ class Mp3Widget(QWidget):
         ab = "  A–B" if self.ab_b is not None else ("  A–" if self.ab_a is not None else "")
         tag = (ext + ("  ♥" if self.is_fav(self.current_path()) else "") + ab + ("  LRC" if self.lyrics else "") + ("  RND" if self.shuffle else "")
                + ("  RPT1" if self.repeat == "one" else "")
-               + (f"  DL{int(self.dl_pct)}%" if self.dl_pct is not None else ""))
+               + (f"  DL{int(self.dl_pct)}%" if self.dl_pct is not None else "")
+               + ("  EQ" if self.player.current_kind() == "dsp" else ""))
         ts = fmt_time(pos)
         tw = QFontMetricsF(f_small).horizontalAdvance(ts)
         self.ink_text(p, L - m - tw, y1, ts, f_small)
@@ -3662,6 +3676,7 @@ class Mp3Widget(QWidget):
         self.act_eq_real.setCheckable(True)
         self.act_lyr = scr.addAction("Текст песни (.lrc)", self.toggle_lyrics)
         self.act_lyr.setCheckable(True)
+        m.addAction("🎚  Эквалайзер звука…   (Ctrl+Alt+E)", self.open_eq)
         nm = m.addMenu("🔊  Выравнивание громкости")
         nm.aboutToShow.connect(lambda nm=nm: self.build_normalize_menu(nm))
         self.lyrics_menu = m.addMenu("🎤  Текст песни")
@@ -4134,6 +4149,69 @@ class Mp3Widget(QWidget):
         LRC_INDEX.build(tuple(x for x in (self.cfg.get("lyrics_dirs") or []) if os.path.isdir(x)))
         self.reload_lyrics()
 
+    # ------------------------------------------------------------ эквалайзер звука
+    def eq_note(self):
+        if not self.player.dsp_decks:
+            return "Недоступен: " + (self.player.dsp_error or "нет PyAV")
+        if self.radio:
+            return "На радио эквалайзер не действует."
+        return "Двойной клик по ползунку — в ноль. Esc — закрыть."
+
+    def open_eq(self):
+        if self.eq_panel is None:
+            self.eq_panel = EqPanel(eqmod.LABELS, eqmod.PRESETS, eqmod.MAX_DB)
+            self.eq_panel.changed.connect(self.on_eq_changed)
+        e = self.player.equalizer
+        self.eq_panel.set_state(e.gains, e.enabled, self.cfg.get("eq_preset", "Плоский"), self.eq_note())
+        for sl in self.eq_panel.sliders:
+            sl.setEnabled(bool(self.player.dsp_decks))
+        self.eq_panel.open_near(self.visual_rect())
+
+    def on_eq_changed(self, gains, enabled, preset):
+        self._eq_pending = (gains, enabled, preset)
+        self.eq_apply_timer.start()                   # ползунок тянут — пересчёт не чаще 16 раз/с
+
+    def apply_eq_now(self):
+        if not self._eq_pending:
+            return
+        gains, enabled, preset = self._eq_pending
+        self._eq_pending = None
+        self.set_eq(gains, enabled, preset, note=False)
+
+    def set_eq(self, gains, enabled, preset, note=True):
+        e = self.player.equalizer
+        e.set(gains, enabled)
+        self.cfg["eq_gains"], self.cfg["eq_on"], self.cfg["eq_preset"] = list(e.gains), e.enabled, preset
+        want = e.active() and bool(self.player.dsp_decks)
+        if want != self.player.use_dsp:
+            self.player.use_dsp = want
+            self.switch_audio_path()
+        if note:
+            self.flash(("EQ: " + preset.upper()) if e.active() else "EQ: ВЫКЛ", 2.0)
+        self.save_later()
+
+    def switch_audio_path(self):
+        """Эквалайзер включили/выключили — перевести текущий трек на нужный путь звука
+        с коротким кроссфейдом, с того же места."""
+        path = self.loaded_path
+        if not path or self.radio:
+            return
+        url = QUrl.fromLocalFile(path)
+        if self.player.kind_for(url) == self.player.current_kind():
+            return
+        pos, playing = self.player.position(), self.is_playing()
+        to_dsp = self.player.kind_for(url) == "dsp"
+        self.pending_seek = pos if (pos > 0 and not to_dsp) else None   # свой путь мотает сразу
+        self.player.load(url, autoplay=playing, fade_ms=500 if playing else 0, gain=self.track_gain(path))
+        if pos > 0:
+            self.player.setPosition(pos)
+
+    def cycle_eq_preset(self):
+        names = list(eqmod.PRESETS)
+        cur = self.cfg.get("eq_preset", "Плоский")
+        nxt = names[(names.index(cur) + 1) % len(names)] if cur in names else names[1]
+        self.set_eq(eqmod.PRESETS[nxt], nxt != "Плоский", nxt)
+
     # ------------------------------------------------------------ выравнивание громкости
     NORM_MODES = {"off": ("Выключено", None), "spotify": ("Как Spotify (−14 LUFS)", -14.0),
                   "quiet": ("Ровнее, но тише (−18 LUFS)", -18.0)}
@@ -4454,7 +4532,22 @@ def _fatal_box(text):
     print(msg)
 
 
+def _check_dsp(out_path):
+    """MP3Player.exe --check-dsp файл — проверка сборки: есть ли PyAV и эквалайзер."""
+    try:
+        import dsp_player
+        ok = dsp_player.available()
+        msg = "ok" if ok else ("PyAV: " + (dsp_player.AV_ERROR or "нет numpy"))
+    except Exception as e:
+        ok, msg = False, f"{type(e).__name__}: {e}"
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(msg)
+    return 0 if ok else 1
+
+
 def main():
+    if len(sys.argv) >= 3 and sys.argv[1] == "--check-dsp":
+        return _check_dsp(sys.argv[2])
     # ошибки во время работы — в лог, а не молча
     sys.excepthook = lambda t, e, tb: (_log_exception(t, e, tb), sys.__excepthook__(t, e, tb))
     if sys.platform == "win32":

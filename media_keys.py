@@ -172,6 +172,7 @@ HOTKEYS = [  # (id, модификаторы, клавиша, команда, п
     (13, MOD_CONTROL | MOD_ALT, ord("M"), "mini", "Ctrl+Alt+M — мини-режим / большой плеер"),
     (14, MOD_CONTROL | MOD_ALT, ord("R"), "radio", "Ctrl+Alt+R — радио / обратно к музыке"),
     (15, MOD_CONTROL | MOD_ALT, ord("D"), "download", "Ctrl+Alt+D — скачать в плеер (Doulander)"),
+    (16, MOD_CONTROL | MOD_ALT, ord("E"), "eq", "Ctrl+Alt+E — эквалайзер звука"),
 ]
 # Запасной вариант: если системные медиа-сессии недоступны, ловим медиа-клавиши сами
 MEDIA_FALLBACK = [

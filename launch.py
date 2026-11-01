@@ -34,6 +34,9 @@ def forward_to_running():
 
 
 if __name__ == "__main__":
+    if len(sys.argv) >= 3 and sys.argv[1] == "--check-dsp":
+        import mp3player
+        sys.exit(mp3player.main())
     if forward_to_running():
         sys.exit(0)
     import mp3player

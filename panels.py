@@ -558,3 +558,181 @@ class NowPlayingToast(QWidget):
             line(pad + 56, self.artist, _font(12), LCD)
         if self.extra:
             line(pad + 74, self.extra, _font(11), DIM)
+
+
+# ===================================================================== Эквалайзер
+class EqPanel(QWidget):
+    """10 полос ±12 дБ, пресеты, вкл/выкл. Сигнал changed(полосы, вкл, имя пресета)."""
+    changed = Signal(list, bool, str)
+
+    def __init__(self, bands_labels, presets, max_db=12):
+        super().__init__(None, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint |
+                         Qt.WindowType.NoDropShadowWindowHint)
+        from PySide6.QtWidgets import QSlider, QComboBox, QPushButton, QGridLayout
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.presets = presets
+        self._busy = False
+        frame = QFrame(self)
+        frame.setObjectName("panel")
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(frame)
+        lay = QVBoxLayout(frame)
+        lay.setContentsMargins(14, 10, 14, 10)
+        lay.setSpacing(8)
+
+        head = QHBoxLayout()
+        title = QLabel("ЭКВАЛАЙЗЕР")
+        title.setObjectName("title")
+        head.addWidget(title)
+        head.addStretch(1)
+        self.on_btn = QPushButton("ВКЛ")
+        self.on_btn.setObjectName("favbtn")
+        self.on_btn.setCheckable(True)
+        self.on_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.on_btn.toggled.connect(self._on_toggle)
+        head.addWidget(self.on_btn)
+        lay.addLayout(head)
+
+        row = QHBoxLayout()
+        self.combo = QComboBox()
+        self.combo.addItems(list(presets) + ["Свой"])
+        self.combo.currentTextChanged.connect(self._on_preset)
+        row.addWidget(self.combo, 1)
+        reset = QPushButton("сброс")
+        reset.setObjectName("favbtn")
+        reset.setCursor(Qt.CursorShape.PointingHandCursor)
+        reset.clicked.connect(lambda: self.combo.setCurrentText(next(iter(presets))))
+        row.addWidget(reset)
+        lay.addLayout(row)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(6)
+        grid.setVerticalSpacing(2)
+        self.sliders, self.vals = [], []
+        for i, lab in enumerate(bands_labels):
+            v = QLabel("0")
+            v.setObjectName("dim")
+            v.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            s = QSlider(Qt.Orientation.Vertical)
+            s.setRange(-int(max_db * 2), int(max_db * 2))     # шаг 0,5 дБ
+            s.setPageStep(2)
+            s.setMinimumHeight(150)
+            s.setCursor(Qt.CursorShape.PointingHandCursor)
+            s.valueChanged.connect(self._on_slider)
+            s.setToolTip(f"{lab} Гц — двойной клик: в ноль")
+            s.installEventFilter(self)
+            n = QLabel(lab)
+            n.setObjectName("dim")
+            n.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            grid.addWidget(v, 0, i, Qt.AlignmentFlag.AlignHCenter)
+            grid.addWidget(s, 1, i, Qt.AlignmentFlag.AlignHCenter)
+            grid.addWidget(n, 2, i, Qt.AlignmentFlag.AlignHCenter)
+            self.sliders.append(s)
+            self.vals.append(v)
+        lay.addLayout(grid)
+        bass = QHBoxLayout()
+        lb = QLabel("◀ басы")
+        lb.setObjectName("dim")
+        lt = QLabel("верха ▶")
+        lt.setObjectName("dim")
+        bass.addWidget(lb)
+        bass.addStretch(1)
+        bass.addWidget(lt)
+        lay.addLayout(bass)
+        self.note = QLabel("")
+        self.note.setObjectName("dim")
+        self.note.setWordWrap(True)
+        lay.addWidget(self.note)
+        self.restyle()
+        self.resize(430, 360)
+        _live_panels.append(self)
+
+    def restyle(self):
+        self.setStyleSheet(f"""
+            #panel {{ background:{BG}; border:1px solid {BORDER}; border-radius:12px; }}
+            QLabel {{ color:{TEXT}; font-family:{FONTS}; }}
+            #title {{ font-size:15px; font-weight:bold; color:{LCD}; letter-spacing:2px; }}
+            #dim {{ color:{DIM}; font-size:11px; }}
+            QComboBox {{ background:{LCD}; color:{LCD_INK}; border:none; border-radius:6px;
+                         padding:4px 8px; font-family:{FONTS}; font-size:13px; font-weight:bold; }}
+            QComboBox QAbstractItemView {{ background:{BG}; color:{TEXT}; selection-background-color:{LCD};
+                                           selection-color:{LCD_INK}; font-family:{FONTS}; }}
+            #favbtn {{ background:transparent; color:{DIM}; border:1px solid {BORDER}; border-radius:9px;
+                       padding:2px 10px; font-family:{FONTS}; font-size:11px; }}
+            #favbtn:checked {{ background:{LCD}; color:{LCD_INK}; border-color:{LCD}; }}
+            QSlider::groove:vertical {{ background:#2a3337; width:6px; border-radius:3px; }}
+            QSlider::sub-page:vertical {{ background:#2a3337; border-radius:3px; }}
+            QSlider::add-page:vertical {{ background:{LCD}; border-radius:3px; }}
+            QSlider::handle:vertical {{ background:{TEXT}; height:12px; margin:0 -6px; border-radius:6px; }}
+            QSlider::handle:vertical:hover {{ background:{LCD_LIT}; }}
+            QSlider:disabled {{ opacity:0.4; }}
+        """)
+
+    # --- данные
+    def set_state(self, gains, enabled, preset, note=""):
+        self._busy = True
+        for s, v, g in zip(self.sliders, self.vals, gains):
+            s.setValue(int(round(g * 2)))
+            v.setText(f"{g:+.1f}".replace("+0.0", "0").replace("-0.0", "0"))
+        self.on_btn.setChecked(bool(enabled))
+        self.on_btn.setText("ВКЛ" if enabled else "ВЫКЛ")
+        self.combo.setCurrentText(preset if preset in self.presets else "Свой")
+        self.note.setText(note)
+        self._busy = False
+
+    def gains(self):
+        return [s.value() / 2.0 for s in self.sliders]
+
+    def _emit(self, preset):
+        self.changed.emit(self.gains(), self.on_btn.isChecked(), preset)
+
+    def _on_slider(self, _v):
+        for s, v in zip(self.sliders, self.vals):
+            g = s.value() / 2.0
+            v.setText(f"{g:+.1f}".replace("+0.0", "0").replace("-0.0", "0"))
+        if self._busy:
+            return
+        self._busy = True
+        match = next((k for k, p in self.presets.items() if [float(x) for x in p] == self.gains()), "Свой")
+        self.combo.setCurrentText(match)
+        self._busy = False
+        if not self.on_btn.isChecked():
+            self.on_btn.setChecked(True)              # двигаешь ползунок — значит, включить
+            return
+        self._emit(match)
+
+    def _on_preset(self, name):
+        if self._busy or name not in self.presets:
+            return
+        self._busy = True
+        for s, v, g in zip(self.sliders, self.vals, self.presets[name]):
+            s.setValue(int(round(g * 2)))
+            v.setText(f"{float(g):+.1f}".replace("+0.0", "0").replace("-0.0", "0"))
+        self._busy = False
+        if not self.on_btn.isChecked():
+            self.on_btn.setChecked(True)
+        else:
+            self._emit(name)
+
+    def _on_toggle(self, on):
+        self.on_btn.setText("ВКЛ" if on else "ВЫКЛ")
+        if not self._busy:
+            self._emit(self.combo.currentText())
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == QEvent.Type.MouseButtonDblClick and obj in self.sliders:
+            obj.setValue(0)
+            return True
+        return False
+
+    def open_near(self, anchor: QRect):
+        self.move(place_beside(anchor, self.size(), prefer_left=False))
+        self.show()
+        self.activateWindow()
+
+    def keyPressEvent(self, ev):
+        if ev.key() == Qt.Key.Key_Escape:
+            self.hide()
+        else:
+            super().keyPressEvent(ev)
