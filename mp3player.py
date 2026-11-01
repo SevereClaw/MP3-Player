@@ -35,6 +35,7 @@ from stats import Stats, fmt_dur
 import radio as radiomod
 import doulander_link as dlmod
 import updater
+import lyrics_online
 
 APP_NAME = "MP3Player"
 APP_TITLE = "MP3 Плеер"
@@ -614,6 +615,10 @@ class UpdateSignals(QObject):
     event = Signal(str, object)          # ("found"/"progress"/"ready"/"latest"/"error", данные)
 
 
+class LyricsSignals(QObject):
+    done = Signal(str, str, str, bool)   # трек, путь к .lrc (или ""), пояснение, вручную ли
+
+
 class Mp3Widget(QWidget):
     def __init__(self, settings_path, skip_restore=False):
         super().__init__()
@@ -697,6 +702,12 @@ class Mp3Widget(QWidget):
         self.upd_timer.timeout.connect(self.update_tick)
         self.upd_timer.start()
         QTimer.singleShot(30 * 1000, self.update_tick)
+        # тексты из интернета (lrclib.net)
+        self.lyr_sig = LyricsSignals(self)
+        self.lyr_sig.done.connect(self.on_lyrics_online)
+        self.lyr_busy = set()
+        self.lyr_timer = QTimer(self, singleShot=True, interval=1500)
+        self.lyr_timer.timeout.connect(lambda: self.fetch_lyrics_online(manual=False))
         self._radio_retry = 0
         self._eq_real_since = None
         # статистика и итоги
@@ -1305,6 +1316,8 @@ class Mp3Widget(QWidget):
                 seek, resumed = max(0, int(saved) - 3000), True
         self.loaded_path = path
         self.lyrics = self.load_lyrics(path) if self.cfg.get("lyrics", True) else None
+        if self.lyrics is None and self.__dict__.get("lyr_timer") is not None:
+            self.lyr_timer.start()                   # .lrc нет — через 1,5 с поискать в интернете
         self.ab_a = self.ab_b = None                 # новый трек — без повтора A–B
         self._listened, self._play_counted = 0.0, False
         self.pending_seek = seek if seek and seek > 0 else None
@@ -2172,6 +2185,8 @@ class Mp3Widget(QWidget):
                 and getattr(self, "_meta_lyrics_retry", False) and (t or a)):
             self._meta_lyrics_retry = False
             self.lyrics = self.load_lyrics(self.loaded_path, self.title, self.artist)
+        if self.lyrics is None and self.loaded_path and not self.radio:
+            self.lyr_timer.start()            # своего .lrc нет — поискать в интернете
         self.update_tray_tip()
         self.sys_track_timer.start()
         self.refresh()
@@ -4103,12 +4118,79 @@ class Mp3Widget(QWidget):
         LRC_INDEX.build(tuple(x for x in (self.cfg.get("lyrics_dirs") or []) if os.path.isdir(x)))
         self.reload_lyrics()
 
+    # ------------------------------------------------------------ тексты из интернета
+    def fetch_lyrics_online(self, manual=False):
+        path = self.loaded_path
+        if not path or self.radio or not self.cfg.get("lyrics", True):
+            return
+        if not manual:
+            if not self.cfg.get("lyrics_online", True) or self.lyrics is not None:
+                return
+            miss = (self.cfg.get("lyrics_missing") or {}).get(pkey(path))
+            if miss and time.time() - miss < 7 * 24 * 3600:     # недавно не нашли — не долбим сайт
+                return
+        if pkey(path) in self.lyr_busy:
+            return
+        self.lyr_busy.add(pkey(path))
+        if manual:
+            self.flash("🌐 ИЩУ ТЕКСТ…", 2.0)
+        artist, title, album = self.artist, self.title, self.album
+        dur = max(0, self.player.duration()) / 1000.0
+        fallback = os.path.join(os.path.dirname(self.settings_path), "lyrics")
+        emit = self.lyr_sig.done.emit
+
+        def work():
+            try:
+                text, why = lyrics_online.fetch(artist, title, album, dur)
+                if not text:
+                    emit(path, "", why, manual)
+                    return
+                saved = lyrics_online.save(text, path, artist, title, album, fallback)
+                emit(path, saved, why, manual)
+            except Exception as e:
+                emit(path, "", f"нет связи с lrclib.net ({type(e).__name__})", manual)
+        threading.Thread(target=work, daemon=True).start()
+
+    def on_lyrics_online(self, path, lrc, why, manual):
+        self.lyr_busy.discard(pkey(path))
+        misses = self.cfg.setdefault("lyrics_missing", {})
+        if not lrc:
+            if "нет связи" not in why:
+                misses[pkey(path)] = time.time()
+                while len(misses) > 2000:
+                    misses.pop(next(iter(misses)))
+            if manual:
+                self.flash(("🌐 " + why).upper(), 3.0)
+            self.save_later()
+            return
+        misses.pop(pkey(path), None)
+        if pkey(os.path.dirname(lrc)) != pkey(os.path.dirname(path)):   # не рядом с треком — привязать
+            links = self.cfg.setdefault("lrc_links", {})
+            for k in [k for k in links if pkey(k) == pkey(path)]:
+                links.pop(k)
+            links[npath(path)] = npath(lrc)
+        self.save_later()
+        if self.loaded_path and pkey(self.loaded_path) == pkey(path):
+            self.reload_lyrics(note=False)
+            if self.lyrics:
+                self.flash("🌐 ТЕКСТ НАЙДЕН", 2.0)
+
+    def toggle_lyrics_online(self):
+        self.cfg["lyrics_online"] = not self.cfg.get("lyrics_online", True)
+        self.flash("ТЕКСТЫ ИЗ СЕТИ: " + ("ВКЛ" if self.cfg["lyrics_online"] else "ВЫКЛ"))
+        if self.cfg["lyrics_online"]:
+            self.fetch_lyrics_online(manual=False)
+        self.save_later()
+
     def build_lyrics_menu(self):
         m = self.lyrics_menu
         m.clear()
         a = m.addAction("Показывать текст на экране", self.toggle_lyrics)
         a.setCheckable(True)
         a.setChecked(bool(self.cfg.get("lyrics", True)))
+        a = m.addAction("Искать тексты в интернете сам (если .lrc нет)", self.toggle_lyrics_online)
+        a.setCheckable(True)
+        a.setChecked(bool(self.cfg.get("lyrics_online", True)))
         m.addSeparator()
         p = self.loaded_path
         if p:
@@ -4119,6 +4201,10 @@ class Mp3Widget(QWidget):
             else:
                 info = m.addAction("Для этого трека текст не найден")
             info.setEnabled(False)
+            if not self.radio:
+                m.addAction("🌐  Найти текст в интернете (lrclib.net)" if not self.lyrics
+                            else "🌐  Поискать другой текст в интернете",
+                            lambda: self.fetch_lyrics_online(manual=True))
             m.addAction("📎  Привязать .lrc к этому треку…   (или перетащи .lrc на плеер)",
                         self.pick_lrc_for_track)
             if any(pkey(k) == pkey(p) for k in (self.cfg.get("lrc_links") or {})):
@@ -4146,6 +4232,7 @@ class Mp3Widget(QWidget):
         self.lyrics = self.load_lyrics(p) if (p and self.cfg.get("lyrics", True)) else None
         if self.cfg.get("lyrics", True) and p and not self.lyrics:
             self.flash("НЕТ .LRC ФАЙЛА")
+            self.fetch_lyrics_online(manual=False)
 
     def replay_boot(self):
         self._boot_sound_done = False
