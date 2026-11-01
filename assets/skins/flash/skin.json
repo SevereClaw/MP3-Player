@@ -1,0 +1,75 @@
+{
+ "name": "Флешка",
+ "body": "body.png",
+ "screen": [
+  45,
+  392,
+  162,
+  669
+ ],
+ "screen_radius": 6,
+ "text_rotation": 90,
+ "buttons": {
+  "prev": [
+   266,
+   445,
+   38,
+   52
+  ],
+  "play": [
+   266,
+   605,
+   38,
+   96
+  ],
+  "next": [
+   266,
+   775,
+   38,
+   101
+  ],
+  "shuffle": [
+   266,
+   925,
+   38,
+   91
+  ]
+ },
+ "press_offset": [
+  -1.5,
+  0
+ ],
+ "folder_zone": [
+  0,
+  1100,
+  303,
+  302
+ ],
+ "pad": [
+  40,
+  240
+ ],
+ "theme": "ЗЕЛЁНАЯ",
+ "cap": {
+  "image": "cap.png",
+  "bottom": 362,
+  "pivot_x": 145,
+  "lift": 185,
+  "plug": [
+   75,
+   196,
+   140,
+   172
+  ]
+ },
+ "hints": {
+  "folder": "📁  Следующая папка"
+ },
+ "shape": "cylinder",
+ "axis_x": 145,
+ "radius": 143.5,
+ "band_u": [
+  33.5,
+  38.5
+ ]
+}
