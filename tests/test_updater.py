@@ -79,6 +79,8 @@ def check():
                                    capture_output=True, timeout=120)
                 print("rc", r.returncode, "\nstdout:", r.stdout.decode("oem", "replace")[-3000:],
                       "\nstderr:", r.stderr.decode("oem", "replace")[-3000:])
+        print("after manual run, still bad:",
+              [p for p, v in want.items() if not (os.path.isfile(p) and read(p) == v)])
     if os.path.exists(os.path.join(APP, "_internal", "gone.dll")):
         bad.append("старый _internal не убран")
     if os.path.exists(os.path.join(APP, "_internal.old")):
