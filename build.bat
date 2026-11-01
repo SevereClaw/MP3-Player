@@ -15,7 +15,7 @@ python -m pip install --upgrade -r requirements.txt pyinstaller
 if errorlevel 1 goto :err
 
 echo === Building MP3Player (folder build - starts fast) ===
-python -m PyInstaller --noconfirm --clean --onedir --windowed --name MP3Player --icon assets\icon.ico --add-data "assets;assets" --collect-all winrt --hidden-import mp3player --hidden-import skin_editor --hidden-import lyrics --hidden-import geom3d --hidden-import radio --hidden-import doulander_link --hidden-import updater --hidden-import lyrics_online launch.py
+python -m PyInstaller --noconfirm --clean --onedir --windowed --name MP3Player --icon assets\icon.ico --add-data "assets;assets" --collect-all winrt --hidden-import mp3player --hidden-import skin_editor --hidden-import lyrics --hidden-import geom3d --hidden-import radio --hidden-import doulander_link --hidden-import updater --hidden-import lyrics_online --hidden-import loudness --collect-submodules mutagen launch.py
 if errorlevel 1 goto :err
 
 echo.

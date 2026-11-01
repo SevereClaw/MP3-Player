@@ -30,7 +30,7 @@ jobs:
           python -m pip install -r requirements.txt pyinstaller
 
       - name: Check that all modules import
-        run: python -c "import mp3player, skin_editor, lyrics, geom3d, radio, doulander_link, updater, lyrics_online, media_keys, panels, stats, spectrum, audio_engine, desktop_keeper, winassoc"
+        run: python -c "import mp3player, skin_editor, lyrics, geom3d, radio, doulander_link, updater, lyrics_online, loudness, media_keys, panels, stats, spectrum, audio_engine, desktop_keeper, winassoc"
 
       - name: Updater self-test (replaces files like a real update)
         env:
@@ -38,6 +38,11 @@ jobs:
         run: |
           python tests/test_updater.py start
           python tests/test_updater.py check
+
+      - name: Loudness measuring (Qt decoder + EBU R128)
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python tests/test_loudness.py
 
       - name: Lyrics from lrclib.net (real requests)
         continue-on-error: true
@@ -56,7 +61,8 @@ jobs:
           --collect-all winrt
           --hidden-import mp3player --hidden-import skin_editor --hidden-import lyrics
           --hidden-import geom3d --hidden-import radio --hidden-import doulander_link
-          --hidden-import updater --hidden-import build_info --hidden-import lyrics_online
+          --hidden-import updater --hidden-import build_info --hidden-import lyrics_online --hidden-import loudness
+          --collect-submodules mutagen
           launch.py
 
       - name: Smoke test - the exe starts and keeps running

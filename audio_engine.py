@@ -22,6 +22,8 @@ class _Deck:
         self.target = 1.0
         self.rate = 0.0         # единиц в секунду
         self.on_done = None
+        self.gain = 1.0         # выравнивание громкости этого трека (множитель)
+        self.gain_target = 1.0
 
 
 class AudioEngine(QObject):
@@ -112,7 +114,20 @@ class AudioEngine(QObject):
         self.near_ms = max(0, int(ms))
 
     # ------------------------------------------------------------ управление
-    def load(self, url: QUrl, autoplay=True, fade_ms=0):
+    def set_gain(self, g, glide_ms=1500):
+        """Поправка громкости текущего трека; меняется плавно, без скачка."""
+        d = self.cur
+        d.gain_target = max(0.05, min(1.0, float(g)))
+        if glide_ms <= 0:
+            d.gain = d.gain_target
+            self._apply(d)
+            return
+        d.gain_rate = abs(d.gain_target - d.gain) / (glide_ms / 1000.0)
+        if not self.timer.isActive():
+            self._last_tick = time.monotonic()
+            self.timer.start()
+
+    def load(self, url: QUrl, autoplay=True, fade_ms=0, gain=1.0):
         old = self.cur
         was_playing = (old.player.playbackState() == PS.PlayingState) and not self.pausing
         self.pausing = False
@@ -123,6 +138,7 @@ class AudioEngine(QObject):
             new = self.cur
             new.on_done = None
             new.player.stop()
+            new.gain = new.gain_target = max(0.05, min(1.0, float(gain)))
             new.x = 0.0
             self._apply(new)
             new.player.setSource(url)
@@ -133,6 +149,7 @@ class AudioEngine(QObject):
         else:
             d = self.cur
             d.on_done = None
+            d.gain = d.gain_target = max(0.05, min(1.0, float(gain)))
             d.player.setSource(url)
             if autoplay:
                 d.x = 0.0
@@ -190,7 +207,7 @@ class AudioEngine(QObject):
     # ------------------------------------------------------------ плавность
     def _apply(self, d):
         # равномощная кривая: при кроссфейде общая громкость не проседает
-        d.audio.setVolume(self.user_vol * math.sin(max(0.0, min(1.0, d.x)) * math.pi / 2))
+        d.audio.setVolume(self.user_vol * d.gain * math.sin(max(0.0, min(1.0, d.x)) * math.pi / 2))
 
     def _ramp(self, d, target, ms, on_done=None):
         d.target = target
@@ -216,6 +233,15 @@ class AudioEngine(QObject):
         self._last_tick = now
         moving = False
         for d in self.decks:
+            if d.gain != d.gain_target:                     # плавная поправка громкости
+                step = getattr(d, "gain_rate", 1.0) * dt
+                if abs(d.gain_target - d.gain) <= step:
+                    d.gain = d.gain_target
+                else:
+                    d.gain += step if d.gain_target > d.gain else -step
+                    moving = True
+                if d.x == d.target:
+                    self._apply(d)
             if d.x == d.target:
                 continue
             step = d.rate * dt
@@ -227,5 +253,5 @@ class AudioEngine(QObject):
                 d.x += step if d.target > d.x else -step
                 self._apply(d)
                 moving = True
-        if not moving and all(d.x == d.target for d in self.decks):
+        if not moving and all(d.x == d.target and d.gain == d.gain_target for d in self.decks):
             self.timer.stop()

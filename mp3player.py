@@ -13,7 +13,7 @@ import threading
 import time
 
 from PySide6.QtCore import (Qt, QTimer, QRect, QRectF, QPointF, QUrl, QStandardPaths,
-                            QLockFile, QPoint, QBuffer, QIODevice, QObject, Signal)
+                            QLockFile, QPoint, QBuffer, QIODevice, QObject, Signal, QThread)
 from PySide6.QtGui import (QPixmap, QPainter, QColor, QFont, QFontMetricsF, QTransform, QDesktopServices,
                            QPolygonF, QImage,
                            QIcon, QAction, QActionGroup, QPainterPath, QPen,
@@ -36,6 +36,7 @@ import radio as radiomod
 import doulander_link as dlmod
 import updater
 import lyrics_online
+import loudness
 
 APP_NAME = "MP3Player"
 APP_TITLE = "MP3 Плеер"
@@ -680,6 +681,15 @@ class Mp3Widget(QWidget):
 
         # аудио
         self.player = AudioEngine(self, volume=float(self.cfg.get("volume", 0.6)))
+        # выравнивание громкости: меряем каждый файл один раз и запоминаем
+        self.loud_cache = loudness.LoudnessCache(
+            os.path.join(os.path.dirname(self.settings_path), "loudness.json"))
+        self.loud_worker = None
+        self.loud_gains = []                      # поправки уже измеренных — для «средней»
+        if loudness.np is not None:
+            self.loud_worker = loudness.make_worker(self.loud_cache)
+            self.loud_worker.measured.connect(self.on_loudness)
+            self.loud_worker.start(QThread.Priority.LowestPriority)
         self.player.set_crossfade(int(self.cfg.get("crossfade", 4000)))
         self.player.nearEnd.connect(self.on_near_end)
         self.spectrum = Spectrum(self.player, self)
@@ -1183,6 +1193,7 @@ class Mp3Widget(QWidget):
         self.load_current(autoplay=autoplay, seek=start_pos, fade_ms=self.fade_ms("skip"))
         if self.playlist_panel.isVisible():
             self.playlist_panel.set_tracks(self.files, self.current_index())
+        self.queue_loudness()
         self.save_later()
 
     # ------------------------------------------------------------ место в файле / папки
@@ -1321,7 +1332,8 @@ class Mp3Widget(QWidget):
         self.ab_a = self.ab_b = None                 # новый трек — без повтора A–B
         self._listened, self._play_counted = 0.0, False
         self.pending_seek = seek if seek and seek > 0 else None
-        self.player.load(QUrl.fromLocalFile(path), autoplay=autoplay, fade_ms=fade_ms)
+        self.player.load(QUrl.fromLocalFile(path), autoplay=autoplay, fade_ms=fade_ms,
+                         gain=self.track_gain(path))
         if resumed:
             self.flash(f"ПРОДОЛЖЕНИЕ {fmt_time(seek)}", 2.5)
         if autoplay:
@@ -1415,7 +1427,7 @@ class Mp3Widget(QWidget):
         self._listened, self._play_counted = 0.0, False
         self.loaded_path = url
         self.pending_seek = None
-        self.player.load(QUrl(url), autoplay=autoplay, fade_ms=fade_ms)
+        self.player.load(QUrl(url), autoplay=autoplay, fade_ms=fade_ms, gain=1.0)
         self.radiometa.start(url)
         self._radio_retry = 0
         if autoplay:
@@ -2474,6 +2486,8 @@ class Mp3Widget(QWidget):
             ("ЗАСТАВКА", onoff("boot_anim"), lambda: self.toggle_cfg("boot_anim", "ЗАСТАВКА")),
             ("ПЕРЕХОД", f"{xf // 1000} С" if xf else "ВЫКЛ", cycle_xf),
             ("ЗАТУХАНИЕ", onoff("fade_pause"), self.toggle_fade_pause),
+            ("РОВНАЯ ГРОМК.", {"off": "ВЫКЛ", "spotify": "−14", "quiet": "−18"}.get(
+                self.cfg.get("normalize", "spotify"), "−14"), self.cycle_normalize),
             ("ЗАКЛАДКИ", onoff("resume_long"), self.toggle_resume),
             ("ОБЛОЖКА", onoff("cover_popup"), self.toggle_cover_popup),
             ("РАЗМЕР", size_label, cycle_size),
@@ -3648,6 +3662,8 @@ class Mp3Widget(QWidget):
         self.act_eq_real.setCheckable(True)
         self.act_lyr = scr.addAction("Текст песни (.lrc)", self.toggle_lyrics)
         self.act_lyr.setCheckable(True)
+        nm = m.addMenu("🔊  Выравнивание громкости")
+        nm.aboutToShow.connect(lambda nm=nm: self.build_normalize_menu(nm))
         self.lyrics_menu = m.addMenu("🎤  Текст песни")
         self.lyrics_menu.setToolTipsVisible(True)
         self.lyrics_menu.aboutToShow.connect(self.build_lyrics_menu)
@@ -4118,6 +4134,92 @@ class Mp3Widget(QWidget):
         LRC_INDEX.build(tuple(x for x in (self.cfg.get("lyrics_dirs") or []) if os.path.isdir(x)))
         self.reload_lyrics()
 
+    # ------------------------------------------------------------ выравнивание громкости
+    NORM_MODES = {"off": ("Выключено", None), "spotify": ("Как Spotify (−14 LUFS)", -14.0),
+                  "quiet": ("Ровнее, но тише (−18 LUFS)", -18.0)}
+
+    def norm_target(self):
+        return self.NORM_MODES.get(self.cfg.get("normalize", "spotify"), (None, -14.0))[1]
+
+    def track_gain(self, path):
+        target = self.norm_target()
+        if target is None or not path or self.loud_worker is None:
+            return 1.0
+        lufs = self.loud_cache.get(path)
+        if lufs is None:                       # ещё не мерили — сразу в начало очереди,
+            self.loud_worker.enqueue([path], front=True)
+            if self.loud_gains:                # а пока — средняя поправка, чтобы не скакало
+                return sum(self.loud_gains[-50:]) / len(self.loud_gains[-50:])
+            return 1.0
+        return loudness.gain_for(lufs, target)
+
+    def queue_loudness(self):
+        if self.loud_worker is None or self.norm_target() is None or self.radio or not self.files:
+            return
+        i = self.pos_in_order
+        upcoming = [self.files[j] for j in self.order[i:] + self.order[:i]]     # ближайшие — первыми
+        self.loud_worker.enqueue(upcoming[:3], front=True)
+        self.loud_worker.enqueue(upcoming[3:])
+
+    def on_loudness(self, path, lufs):
+        target = self.norm_target()
+        if target is None:
+            return
+        if lufs is not None:
+            self.loud_gains.append(loudness.gain_for(lufs, target))
+            del self.loud_gains[:-200]
+        if self.loaded_path and pkey(path) == pkey(self.loaded_path) and not self.radio:
+            self.player.set_gain(loudness.gain_for(lufs, target), glide_ms=2500)
+
+    def set_normalize(self, mode):
+        self.cfg["normalize"] = mode
+        self.flash("ВЫРАВНИВАНИЕ: " + {"off": "ВЫКЛ", "spotify": "−14 LUFS", "quiet": "−18 LUFS"}[mode], 2.0)
+        if not self.radio:
+            self.player.set_gain(self.track_gain(self.loaded_path) if mode != "off" else 1.0, glide_ms=800)
+        self.queue_loudness()
+        self.save_later()
+
+    def cycle_normalize(self):
+        keys = list(self.NORM_MODES)
+        cur = self.cfg.get("normalize", "spotify")
+        self.set_normalize(keys[(keys.index(cur) + 1) % len(keys)] if cur in keys else "spotify")
+
+    def remeasure_current(self):
+        p = self.loaded_path
+        if not p or self.loud_worker is None or self.radio:
+            return
+        self.loud_cache.db.pop(loudness.LoudnessCache._key(p), None)
+        self.loud_worker.enqueue([p], front=True)
+        self.flash("МЕРЯЮ ГРОМКОСТЬ…")
+
+    def build_normalize_menu(self, nm):
+        nm.clear()
+        cur = self.cfg.get("normalize", "spotify")
+        grp = QActionGroup(nm)
+        for key, (name, _t) in self.NORM_MODES.items():
+            a = nm.addAction(name, lambda _=False, k=key: self.set_normalize(k))
+            a.setCheckable(True)
+            a.setChecked(key == cur)
+            grp.addAction(a)
+        nm.addSeparator()
+        if self.loud_worker is None:
+            nm.addAction("Недоступно (нет numpy)").setEnabled(False)
+            return
+        p = self.loaded_path
+        if p and not self.radio:
+            lufs = self.loud_cache.get(p)
+            if lufs is None:
+                txt = "Этот трек: ещё меряю…"
+            elif lufs == "fail":
+                txt = "Этот трек: не получилось измерить"
+            else:
+                g = loudness.gain_for(lufs, self.norm_target() or -14.0)
+                txt = f"Этот трек: {lufs:.1f} LUFS → {20 * math.log10(g):+.1f} дБ"
+            nm.addAction(txt).setEnabled(False)
+            nm.addAction("Перемерить этот трек", self.remeasure_current)
+        left = self.loud_worker.pending()
+        nm.addAction(f"В очереди на замер: {left}" if left else "Все треки списка измерены").setEnabled(False)
+
     # ------------------------------------------------------------ тексты из интернета
     def fetch_lyrics_online(self, manual=False):
         path = self.loaded_path
@@ -4302,6 +4404,9 @@ class Mp3Widget(QWidget):
         self._quit_now()
 
     def _quit_now(self):
+        if self.loud_worker is not None:
+            self.loud_worker.stop()
+            self.loud_cache.save()
         if self.upd_ready and self.cfg.get("auto_update", True):
             self.install_update(restart=False)          # скачанная сборка — при выходе
         self.write_nowplaying(closing=True)
