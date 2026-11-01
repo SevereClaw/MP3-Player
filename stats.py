@@ -20,7 +20,7 @@ def fmt_dur(sec):
 class Stats:
     def __init__(self, path):
         self.path = path
-        self.data = {"tracks": {}, "days": {}, "since": _dt.date.today().isoformat()}
+        self.data = {"tracks": {}, "days": {}, "daily": {}, "since": _dt.date.today().isoformat()}
         try:
             with open(path, "r", encoding="utf-8") as f:
                 d = json.load(f)
@@ -42,12 +42,19 @@ class Stats:
             t["artist"] = artist
         day = (today or _dt.date.today()).isoformat()
         self.data["days"][day] = self.data["days"].get(day, 0.0) + sec
+        d = self._daily(day, track)                  # для итогов недели: что слушал в этот день
+        d["s"] = round(d.get("s", 0.0) + sec, 1)
         self.dirty = True
+
+    def _daily(self, day, track):
+        return self.data.setdefault("daily", {}).setdefault(day, {}).setdefault(track, {})
 
     def add_play(self, track):
         if track:
             t = self.data["tracks"].setdefault(track, {"sec": 0.0, "plays": 0})
             t["plays"] = t.get("plays", 0) + 1
+            d = self._daily(_dt.date.today().isoformat(), track)
+            d["p"] = d.get("p", 0) + 1
             self.dirty = True
 
     def save(self):
@@ -56,6 +63,9 @@ class Stats:
         days = self.data["days"]
         for k in sorted(days)[:-120]:            # хватит последних 4 месяцев
             days.pop(k, None)
+        daily = self.data.get("daily") or {}
+        for k in sorted(daily)[:-70]:            # потреково — последние 10 недель
+            daily.pop(k, None)
         try:
             tmp = self.path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:

@@ -9,6 +9,7 @@ import json
 import math
 import random
 import re
+import datetime
 import threading
 import time
 
@@ -38,6 +39,7 @@ import doulander_link as dlmod
 import updater
 import lyrics_online
 import loudness
+import weekly
 
 APP_NAME = "MP3Player"
 APP_TITLE = "MP3 Плеер"
@@ -617,6 +619,10 @@ class UpdateSignals(QObject):
     event = Signal(str, object)          # ("found"/"progress"/"ready"/"latest"/"error", данные)
 
 
+class WeeklySignals(QObject):
+    done = Signal(bool, str, object)     # получилось?, текст, куда сообщить (или None)
+
+
 class LyricsSignals(QObject):
     done = Signal(str, str, str, bool)   # трек, путь к .lrc (или ""), пояснение, вручную ли
 
@@ -733,6 +739,14 @@ class Mp3Widget(QWidget):
         self._eq_real_since = None
         # статистика и итоги
         self.stats = Stats(os.path.join(self.data_dir, "stats.json"))
+        # итоги недели (бот в Discord / уведомление)
+        self.wk_sig = WeeklySignals(self)
+        self.wk_sig.done.connect(self.on_weekly_done)
+        self.wk_busy, self.wk_fail_at = False, 0.0
+        self.wk_timer = QTimer(self, interval=10 * 60 * 1000)
+        self.wk_timer.timeout.connect(self.weekly_tick)
+        self.wk_timer.start()
+        QTimer.singleShot(90 * 1000, self.weekly_tick)
         self._listened = 0.0
         self._play_counted = False
         self.stats_page = None
@@ -3625,6 +3639,7 @@ class Mp3Widget(QWidget):
         self.act_fav_play = fv.addAction("Слушать избранное", self.play_favorites)
         it = m.addMenu("📊  Итоги")
         it.addAction("Показать на экране   (Ctrl+Alt+I)", self.open_stats)
+        it.addAction("Итоги недели в Discord / уведомлением…", self.open_weekly)
         it.addAction("Сбросить статистику…", self.reset_stats)
         ab = m.addMenu("🅰🅱  Повтор A–B   (удерживай ⏯ / Ctrl+Alt+A)")
         ab.addAction("Поставить A (сейчас)", self.ab_set_a)
@@ -4185,6 +4200,97 @@ class Mp3Widget(QWidget):
     def rescan_lyrics(self):
         LRC_INDEX.build(tuple(x for x in (self.cfg.get("lyrics_dirs") or []) if os.path.isdir(x)))
         self.reload_lyrics()
+
+    # ------------------------------------------------------------ итоги недели
+    def open_weekly(self):
+        from weekly_ui import WeeklyDialog
+        self.stats.save()
+        self._wk_dialog = WeeklyDialog(self.cfg, self.save_weekly, self.test_weekly)
+        self._wk_dialog.show()
+        self._wk_dialog.raise_()
+        self._wk_dialog.activateWindow()
+
+    def save_weekly(self, v):
+        old = self.cfg.get("weekly") or {}
+        if not old:                       # только что включили — не слать сразу «прошлое» воскресенье
+            h, m = map(int, v["time"].split(":"))
+            v["last"] = weekly.last_due(datetime.datetime.now(), v["day"], h, m).isoformat()
+        else:
+            v["last"] = old.get("last", "")
+        self.cfg["weekly"] = v
+        self.flash("ИТОГИ НЕДЕЛИ: " + ("DISCORD" if v["discord"] else "УВЕДОМЛЕНИЕ" if v["toast"] else "ВЫКЛ"), 2.0)
+        self.save_later()
+
+    def test_weekly(self, v, report):
+        self.send_weekly(v, datetime.date.today(), manual=report)
+
+    def weekly_tick(self):
+        w = self.cfg.get("weekly") or {}
+        if not (w.get("discord") or w.get("toast")) or self.wk_busy:
+            return
+        if time.time() - self.wk_fail_at < 3600:          # не вышло — попробуем через час
+            return
+        h, m = map(int, (w.get("time") or "20:00").split(":"))
+        due = weekly.last_due(datetime.datetime.now(), int(w.get("day", 6)), h, m)
+        if w.get("last") and datetime.datetime.fromisoformat(w["last"]) >= due:
+            return
+        self.wk_due = due
+        self.send_weekly(w, due.date(), manual=None)
+
+    def send_weekly(self, w, end, manual):
+        self.stats.save()
+        rep = weekly.week_report(self.stats.data, end)
+        if w.get("toast") and hasattr(self, "tray"):
+            self.tray.showMessage("Итоги недели · " + weekly.period(rep), weekly.short_text(rep),
+                                  QSystemTrayIcon.MessageIcon.Information, 15000)
+        if not w.get("discord"):
+            self.wk_sig.done.emit(True, "показал уведомлением", manual)
+            return
+        token, user = weekly.unprotect(w.get("token", "")), str(w.get("user", ""))
+        proxy = None
+        d = dlmod.find_doulander(self.cfg.get("doulander_dir"))
+        if d:                                              # если Discord открывается только через VPN
+            s = dlmod.read_settings(d)
+            if (s.get("proxy_mode") or "Нет") != "Нет" and s.get("proxy"):
+                proxy = s["proxy"]
+        self.wk_busy = True
+        emit = self.wk_sig.done.emit
+
+        def work():
+            try:
+                top = rep["top_tracks"][0] if rep["top_tracks"] else None
+                thumb = weekly.itunes_art(top[1], top[0]) if top else None
+                embed = weekly.build_embed(rep, thumb)
+                try:
+                    weekly.send_dm(token, user, embed)
+                except weekly.DiscordError:
+                    raise
+                except Exception:
+                    if not proxy:
+                        raise
+                    weekly.send_dm(token, user, embed, proxy=proxy)     # напрямую не вышло — через прокси
+                emit(True, "отправил тебе в личку Discord", manual)
+            except weekly.DiscordError as e:
+                emit(False, str(e), manual)
+            except Exception as e:
+                emit(False, f"нет связи с Discord ({type(e).__name__})", manual)
+        threading.Thread(target=work, daemon=True).start()
+
+    def on_weekly_done(self, ok, text, report):
+        self.wk_busy = False
+        if report is not None:                             # «Прислать сейчас» из окна настройки
+            report(ok, text)
+            return
+        w = self.cfg.get("weekly") or {}
+        if ok:
+            w["last"] = getattr(self, "wk_due", datetime.datetime.now()).isoformat()
+            self.wk_fail_at = 0.0
+        else:
+            self.wk_fail_at = time.time()
+            if hasattr(self, "tray"):
+                self.tray.showMessage(APP_TITLE, "Итоги недели не отправились: " + text,
+                                      QSystemTrayIcon.MessageIcon.Warning, 8000)
+        self.save_later()
 
     # ------------------------------------------------------------ эквалайзер звука
     def eq_note(self):
