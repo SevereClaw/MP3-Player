@@ -33,6 +33,8 @@ jobs:
         run: python -c "import mp3player, skin_editor, lyrics, geom3d, radio, doulander_link, updater, media_keys, panels, stats, spectrum, audio_engine, desktop_keeper, winassoc"
 
       - name: Updater self-test (replaces files like a real update)
+        env:
+          PYTHONIOENCODING: utf-8
         run: |
           python tests/test_updater.py start
           python tests/test_updater.py check
