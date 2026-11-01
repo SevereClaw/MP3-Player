@@ -8,6 +8,7 @@
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -17,16 +18,22 @@ UA = "MP3Player (https://github.com/SevereClaw/MP3-Player)"
 _TS = re.compile(r"\[\d{1,3}:\d{1,2}(?:[.:]\d{1,3})?\]")
 
 
-def _get(path, params, timeout=8):
+def _get(path, params, timeout=10):
     url = f"{API}/{path}?" + urllib.parse.urlencode({k: v for k, v in params.items() if v})
-    req = urllib.request.Request(url, headers={"User-Agent": UA})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            return None
-        raise
+    req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "application/json"})
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.loads(r.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return None
+            if e.code < 500 or attempt == 2:          # сайт перегружен — пара повторов
+                raise
+        except (urllib.error.URLError, TimeoutError):
+            if attempt == 2:
+                raise
+        time.sleep(1.5 * (attempt + 1))
 
 
 def _norm(s):
