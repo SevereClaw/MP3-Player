@@ -3637,7 +3637,7 @@ class Mp3Widget(QWidget):
         m = QMenu()
         m.setStyleSheet("""
             QMenu { background:#20262a; color:#dfe8e4; border:1px solid #4a5560; padding:4px; }
-            QMenu::item { padding:5px 22px 5px 22px; }
+            QMenu::item { padding:5px 34px 5px 22px; }
             QMenu::item:selected { background:#8fb3a5; color:#111; }
             QMenu::separator { height:1px; background:#3a444c; margin:4px 8px; }
             QMenu::indicator { width:12px; height:12px; left:5px; }
