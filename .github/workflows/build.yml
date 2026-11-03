@@ -57,6 +57,12 @@ jobs:
           PYTHONIOENCODING: utf-8
         run: python tests/test_lyrics_online.py
 
+      - name: UI screenshots (menu)
+        continue-on-error: true
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python tests/ui_menu.py
+
       - name: Stamp build number (for auto-update)
         shell: pwsh
         run: Set-Content -Path build_info.py -Value "BUILD = ${{ github.run_number }}" -Encoding ascii

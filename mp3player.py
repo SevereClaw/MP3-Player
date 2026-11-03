@@ -242,9 +242,14 @@ class WinDesktop:
             u, setlp = cls._api()
             hwnd = int(widget.winId())
             GWL_EXSTYLE, GWL_HWNDPARENT = -20, -8
-            WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW = 0x08000000, 0x00000080
+            WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_APPWINDOW = 0x08000000, 0x00000080, 0x00040000
             ex = u.GetWindowLongW(hwnd, GWL_EXSTYLE)
-            u.SetWindowLongW(hwnd, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)
+            if getattr(widget, "cfg", {}).get("taskbar", False) and not getattr(widget, "is_mini_bar", False):
+                # в панели задач — как обычная программа (кнопка, клик по ней поднимает плеер)
+                ex = (ex | WS_EX_APPWINDOW) & ~WS_EX_TOOLWINDOW & ~WS_EX_NOACTIVATE
+            else:
+                ex = (ex | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW
+            u.SetWindowLongW(hwnd, GWL_EXSTYLE, ex)
             setlp(hwnd, GWL_HWNDPARENT, 0)       # без «хозяина» — иначе может уйти под рабочий стол
         except Exception as e:  # не критично
             print("desktop style failed:", e)
@@ -602,8 +607,7 @@ class MiniBar(QWidget):
             self.o.change_volume(0.05 if d > 0 else -0.05)
 
     def contextMenuEvent(self, e):
-        self.o.sync_menu()
-        self.o.menu.exec(e.globalPos())
+        self.o.popup_menu(e.globalPos())
 
     def leaveEvent(self, _e):
         self.hover = None
@@ -935,8 +939,8 @@ class Mp3Widget(QWidget):
 
     # ------------------------------------------------------------ window
     def apply_flags(self):
-        flags = (Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool |
-                 Qt.WindowType.NoDropShadowWindowHint)
+        flags = (Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint |
+                 (Qt.WindowType.Window if self.cfg.get("taskbar") else Qt.WindowType.Tool))
         if not self.on_desktop:
             flags |= Qt.WindowType.WindowStaysOnTopHint
         vis = self.isVisible()
@@ -3599,8 +3603,7 @@ class Mp3Widget(QWidget):
             self.change_volume(0.05 if d > 0 else -0.05)
 
     def contextMenuEvent(self, e):
-        self.sync_menu()
-        self.menu.exec(e.globalPos())
+        self.popup_menu(e.globalPos())
 
     # ------------------------------------------------------------ drag & drop
     def dragEnterEvent(self, e):
@@ -3639,42 +3642,55 @@ class Mp3Widget(QWidget):
             QMenu::separator { height:1px; background:#3a444c; margin:4px 8px; }
             QMenu::indicator { width:12px; height:12px; left:5px; }
         """)
-        m.addAction("📂  Открыть папку с музыкой…", self.open_folder)
-        self.radio_menu = m.addMenu("📻  Радио   (Ctrl+Alt+R)")
-        self.radio_menu.setToolTipsVisible(True)
-        self.radio_menu.aboutToShow.connect(self.build_radio_menu)
+        om = m.addMenu("📂  Открыть")
+        om.addAction("Папку с музыкой…", self.open_folder)
+        om.addAction("Файлы…", self.open_files)
+        om.addSeparator()
         self.folders_menu = m.addMenu("📁  Мои папки")
         self.folders_menu.setToolTipsVisible(True)
         self.folders_menu.aboutToShow.connect(self.build_folders_menu)
-        m.addAction("🎵  Открыть файлы…", self.open_files)
-        dlm = m.addMenu("⬇  Скачать в плеер (Doulander)   (Ctrl+Alt+D)")
+        self.radio_menu = m.addMenu("📻  Радио")
+        self.radio_menu.setToolTipsVisible(True)
+        self.radio_menu.aboutToShow.connect(self.build_radio_menu)
+        dlm = om.addMenu("⬇  Скачать по ссылке (Doulander)")
         dlm.addAction("Вставить ссылку…", self.download_dialog)
         dlm.addAction("Отменить скачивание", self.dl.cancel).setEnabled(self.dl.pending() > 0)
         dlm.addSeparator()
         dd = self.doulander_dir(ask=False)
         dlm.addAction(("Doulander: " + dd) if dd else "Где Doulander?…", self.choose_doulander)
         m.addAction("📜  Плейлист", self.open_playlist)
-        um = m.addMenu("⬆  Обновления")
-        um.aboutToShow.connect(lambda um=um: self.build_update_menu(um))
         m.addSeparator()
         self.act_play = m.addAction("⏯  Играть / Пауза", self.toggle_play)
-        m.addAction("⏭  Следующий", lambda: self.step(+1))
-        m.addAction("⏮  Предыдущий", lambda: self.step(-1))
-        fv = m.addMenu("❤  Избранное")
+        pb = m.addMenu("🎵  Воспроизведение")
+        pb.addAction("⏭  Следующий", lambda: self.step(+1))
+        pb.addAction("⏮  Предыдущий", lambda: self.step(-1))
+        pb.addSeparator()
+        m.addSeparator()
+        snd_m = m.addMenu("🔊  Звук")
+        snd_m.addAction("🎚  Эквалайзер…   (Ctrl+Alt+E)", self.open_eq)
+        self.lyrics_menu = m.addMenu("🎤  Текст песни")
+        self.lyrics_menu.setToolTipsVisible(True)
+        self.lyrics_menu.aboutToShow.connect(self.build_lyrics_menu)
+        view = m.addMenu("🎨  Вид")
+        it = m.addMenu("📊  Итоги")
+        st_m = m.addMenu("⚙  Настройки")
+        m.addSeparator()
+        self.act_showhide = m.addAction("🙈  Спрятать (останется в трее)", self.toggle_visible)
+        m.addAction("✖  Выход", self.quit)
+        fv = pb.addMenu("❤  Избранное")
         self.act_fav = fv.addAction("♥  В избранное   (двойной клик по экрану)", self.toggle_favorite)
         self.act_fav_play = fv.addAction("Слушать избранное", self.play_favorites)
-        it = m.addMenu("📊  Итоги")
         it.addAction("Показать на экране   (Ctrl+Alt+I)", self.open_stats)
         it.addAction("Итоги недели в Discord / уведомлением…", self.open_weekly)
         it.addAction("Сбросить статистику…", self.reset_stats)
-        ab = m.addMenu("🅰🅱  Повтор A–B   (удерживай ⏯ / Ctrl+Alt+A)")
+        ab = pb.addMenu("🅰🅱  Повтор A–B   (удерживай ⏯)")
         ab.addAction("Поставить A (сейчас)", self.ab_set_a)
         ab.addAction("Поставить B (сейчас) и крутить", self.ab_set_b)
         ab.addAction("Сбросить", self.ab_clear)
-        self.act_shuffle = m.addAction("🔀  Перемешивание", self.toggle_shuffle)
+        self.act_shuffle = pb.addAction("🔀  Перемешивание", self.toggle_shuffle)
         self.act_shuffle.setCheckable(True)
 
-        rep = m.addMenu("🔁  Повтор")
+        rep = pb.addMenu("🔁  Повтор")
         grp = QActionGroup(self)
         self.rep_actions = {}
         for key, name in (("all", "Весь список"), ("one", "Один трек"), ("off", "Выключен")):
@@ -3683,13 +3699,12 @@ class Mp3Widget(QWidget):
             grp.addAction(a)
             self.rep_actions[key] = a
 
-        m.addSeparator()
-        size = m.addMenu("📏  Размер   (Alt + колёсико)")
+        self.skins_menu = view.addMenu("🎨  Скин")
+        size = view.addMenu("📏  Размер   (Alt + колёсико)")
         sgrp = QActionGroup(self)
         self.size_actions = {}
-        self.skins_menu = m.addMenu("🎨  Скин")
         self.skins_menu.aboutToShow.connect(self.build_skins_menu)
-        rot = m.addMenu("🔄  Поворот   (Shift + тянуть / колёсико)")
+        rot = view.addMenu("🔄  Поворот   (Shift + колёсико)")
         rot.addAction("Вертикально  (0°)", lambda: self.set_angle(0))
         rot.addAction("Горизонтально, текст ровно  (−90°)", lambda: self.set_angle(-90))
         rot.addAction("Горизонтально  (90°)", lambda: self.set_angle(90))
@@ -3705,7 +3720,7 @@ class Mp3Widget(QWidget):
             sgrp.addAction(a)
             self.size_actions[val] = a
 
-        place = m.addMenu("🖥  Где показывать")
+        place = view.addMenu("🖥  Где показывать")
         pgrp = QActionGroup(self)
         self.act_desk = place.addAction("Только на рабочем столе", lambda: self.set_mode(True))
         self.act_top = place.addAction("Поверх всех окон", lambda: self.set_mode(False))
@@ -3715,8 +3730,12 @@ class Mp3Widget(QWidget):
         place.addSeparator()
         self.act_keep = place.addAction("Не прятаться по Win+D", self.toggle_keep_desktop)
         self.act_keep.setCheckable(True)
+        place.addSeparator()
+        self.act_taskbar = place.addAction("Показывать в панели задач", self.toggle_taskbar)
+        self.act_taskbar.setCheckable(True)
+        self.act_taskbar.setVisible(sys.platform == "win32")
 
-        self.hot_menu = m.addMenu("⌨  Горячие клавиши")
+        self.hot_menu = st_m.addMenu("⌨  Горячие клавиши")
         self.act_hot = self.hot_menu.addAction("Включены", self.toggle_hotkeys)
         self.act_hot.setCheckable(True)
         self.hot_menu.addSeparator()
@@ -3727,7 +3746,7 @@ class Mp3Widget(QWidget):
             self.hot_labels.append((label, a))
         self.hot_menu.menuAction().setVisible(sys.platform == "win32")
 
-        sm = m.addMenu("🎚  Плавность")
+        sm = snd_m.addMenu("〰  Плавность (затухание, переход)")
         self.act_fade = sm.addAction("Затухание при паузе", self.toggle_fade_pause)
         self.act_fade.setCheckable(True)
         sm.addSeparator()
@@ -3740,7 +3759,7 @@ class Mp3Widget(QWidget):
             a.setCheckable(True)
             xgrp.addAction(a)
             self.xf_actions[ms] = a
-        scr = m.addMenu("📟  Экран")
+        scr = view.addMenu("📟  Экран и звуки кнопок")
         self.act_boot = scr.addAction("Заставка HELLO при запуске", lambda: self.toggle_cfg("boot_anim", "ЗАСТАВКА"))
         self.act_3d = scr.addAction("3D-корпус: наклон при перемещении  (Ctrl + тянуть — покрутить)",
                                     self.toggle_3d)
@@ -3754,12 +3773,8 @@ class Mp3Widget(QWidget):
         self.act_eq_real.setCheckable(True)
         self.act_lyr = scr.addAction("Текст песни (.lrc)", self.toggle_lyrics)
         self.act_lyr.setCheckable(True)
-        m.addAction("🎚  Эквалайзер звука…   (Ctrl+Alt+E)", self.open_eq)
-        nm = m.addMenu("🔊  Выравнивание громкости")
+        nm = snd_m.addMenu("📶  Выравнивание громкости")
         nm.aboutToShow.connect(lambda nm=nm: self.build_normalize_menu(nm))
-        self.lyrics_menu = m.addMenu("🎤  Текст песни")
-        self.lyrics_menu.setToolTipsVisible(True)
-        self.lyrics_menu.aboutToShow.connect(self.build_lyrics_menu)
         self.act_click = scr.addAction("Звук кнопок", lambda: self.toggle_cfg("click_sound", "ЗВУК КНОПОК"))
         snd = scr.addMenu("Звуки")
         sgrp2 = QActionGroup(self)
@@ -3792,12 +3807,15 @@ class Mp3Widget(QWidget):
         scr.addAction("Снять / надеть колпачок (настройки)", self.toggle_cap)
         for a in (self.act_boot, self.act_eq):
             a.setCheckable(True)
-        self.act_resume = m.addAction("🔖  Помнить место в длинных файлах (20+ мин)", self.toggle_resume)
+        self.act_resume = st_m.addAction("🔖  Помнить место в длинных файлах (20+ мин)", self.toggle_resume)
         self.act_resume.setCheckable(True)
 
-        self.act_cover = m.addAction("🖼  Всплывающая обложка", self.toggle_cover_popup)
+        view.addSeparator()
+        self.act_mini = view.addAction("▭  Мини-режим   (Ctrl+Alt+M)", lambda: self.set_mini(not self.cfg.get("mini")))
+        self.act_mini.setCheckable(True)
+        self.act_cover = view.addAction("🖼  Всплывающая обложка", self.toggle_cover_popup)
         self.act_cover.setCheckable(True)
-        tm = m.addMenu("🔔  «Сейчас играет»")
+        tm = view.addMenu("🔔  «Сейчас играет»")
         tgrp = QActionGroup(self)
         self.toast_actions = {}
         for key, name in (("hidden", "Когда плеер спрятан"), ("always", "Всегда"), ("off", "Выключено")):
@@ -3806,24 +3824,24 @@ class Mp3Widget(QWidget):
             tgrp.addAction(a)
             self.toast_actions[key] = a
 
-        self.act_dc = m.addAction("🎮  Показывать в Discord (через Music → Discord)", self.toggle_discord_link)
+        self.act_dc = st_m.addAction("🎮  Показывать в Discord (Music → Discord)", self.toggle_discord_link)
         self.act_dc.setCheckable(True)
-        self.assoc_menu = m.addMenu("🔗  Открывать музыку в MP3 Плеере")
+        self.assoc_menu = st_m.addMenu("🔗  Открывать музыку в MP3 Плеере")
         self.assoc_menu.aboutToShow.connect(self.build_assoc_menu)
         self.assoc_menu.menuAction().setVisible(sys.platform == "win32")
-        self.act_auto = m.addAction("🚀  Запускать вместе с Windows", self.toggle_autostart)
+        self.act_auto = st_m.addAction("🚀  Запускать вместе с Windows", self.toggle_autostart)
         self.act_auto.setCheckable(True)
         self.act_auto.setVisible(sys.platform == "win32")
-        m.addSeparator()
-        self.act_mini = m.addAction("▭  Мини-режим   (Ctrl+Alt+M)", lambda: self.set_mini(not self.cfg.get("mini")))
-        self.act_mini.setCheckable(True)
-        m.addAction("👁  Показать плеер", self.show_player)
-        m.addAction("🙈  Спрятать (останется в трее)", self.hide)
-        m.addAction("🛠  Диагностика…", self.show_diagnostics)
-        m.addAction("✖  Выход", self.quit)
+        st_m.addSeparator()
+        um = st_m.addMenu("⬆  Обновления")
+        um.aboutToShow.connect(lambda um=um: self.build_update_menu(um))
+        st_m.addAction("🛠  Диагностика…", self.show_diagnostics)
         self.menu = m
 
     def sync_menu(self):
+        self.act_showhide.setText("🙈  Спрятать (останется в трее)" if self.player_visible()
+                                  else "👁  Показать плеер")
+        self.act_taskbar.setChecked(bool(self.cfg.get("taskbar", False)))
         self.act_shuffle.setChecked(self.shuffle)
         self.rep_actions[self.repeat].setChecked(True)
         for v, a in self.size_actions.items():
@@ -3870,7 +3888,6 @@ class Mp3Widget(QWidget):
 
     def build_tray(self):
         self.tray = QSystemTrayIcon(QIcon(resource("icon.ico")), self)
-        self.tray.setContextMenu(self.menu)
         self.menu.aboutToShow.connect(self.sync_menu)
         self.tray.activated.connect(self.on_tray)
         self.tray.setToolTip(APP_TITLE)
@@ -3885,6 +3902,8 @@ class Mp3Widget(QWidget):
                 self.show_player()
         elif reason == QSystemTrayIcon.ActivationReason.MiddleClick:
             self.toggle_play()
+        elif reason == QSystemTrayIcon.ActivationReason.Context:
+            self.popup_menu(QCursor.pos())
 
     def open_from_shell(self, paths):
         """Файлы/папки из проводника: один файл — играем его, а плейлист — вся его папка;
@@ -3990,6 +4009,40 @@ class Mp3Widget(QWidget):
             self.cfg["mini"] = False
             self.show_player()
         self.save_later()
+
+    def player_visible(self):
+        return self.mini.isVisible() if self.cfg.get("mini") else self.isVisible()
+
+    def toggle_visible(self):
+        if self.player_visible():
+            (self.mini if self.cfg.get("mini") else self).hide()
+        else:
+            self.show_player()
+
+    def toggle_taskbar(self):
+        """Кнопка плеера в панели задач Windows (вкл/выкл)."""
+        self.cfg["taskbar"] = not self.cfg.get("taskbar", False)
+        was = self.isVisible()
+        self.apply_flags()                       # окно пересоздаётся с нужными флагами
+        if was:
+            self.hide()                          # панель задач замечает смену стиля только так
+            self.show()
+            WinDesktop.apply(self, self.on_desktop)
+        self.flash("ПАНЕЛЬ ЗАДАЧ: " + ("ВКЛ" if self.cfg["taskbar"] else "ВЫКЛ"), 2.0)
+        self.save_later()
+
+    def popup_menu(self, pos):
+        """Меню, которое закрывается кликом мимо. Окна плеера не забирают фокус, поэтому
+        Windows не сообщала меню о клике снаружи — отдаём меню фокус сами."""
+        self.sync_menu()
+        self.menu.popup(pos)
+        self.menu.activateWindow()
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                ctypes.windll.user32.SetForegroundWindow(int(self.menu.winId()))
+            except Exception:
+                pass
 
     def show_player(self):
         """Показать плеер и вытащить его поверх окон (если потерялся — вернуть на экран)."""
