@@ -830,7 +830,10 @@ class Mp3Widget(QWidget):
         self.eq_beat = 0.0
         self._last_anim = time.monotonic()
         self.anim = QTimer(self, interval=40)
+        self.anim.setTimerType(Qt.TimerType.PreciseTimer)      # ровные кадры, без «дёрганья»
         self.anim.timeout.connect(self.on_anim)
+        self._sp_anchor = (0, time.monotonic())                # плавная позиция для текста песни
+        self._sp_raw = -1
         self.anim.start()
         self.phys_timer = QTimer(self, interval=16)     # 3D-наклон: ~60 кадров, только пока качается
         self.phys_timer.timeout.connect(self.on_phys)
@@ -2911,8 +2914,31 @@ class Mp3Widget(QWidget):
         p.fillRect(QRectF(r.left() + 2, r.bottom() - 26, r.width() - 4, 24), sh)
 
     # ------------------------------------------------------------ анимации экрана
+    def smooth_pos(self):
+        """Позиция трека для экрана. Движок сообщает её рывками (раз в 40–100 мс),
+        поэтому между отсчётами досчитываем по часам и мягко подтягиваем к движку."""
+        raw = int(self.player.position())
+        now = time.monotonic()
+        a_pos, a_t = self._sp_anchor
+        if not self.is_playing() or self.radio:
+            self._sp_anchor, self._sp_raw = (raw, now), raw
+            return raw
+        pred = a_pos + (now - a_t) * 1000.0
+        if raw != self._sp_raw:                       # пришёл свежий отсчёт от движка
+            self._sp_raw = raw
+            if abs(raw - pred) > 300:                 # перемотка / новый трек — сразу туда
+                self._sp_anchor = (raw, now)
+                return raw
+            pred += (raw - pred) * 0.05               # плавная поправка, без скачков назад
+            self._sp_anchor = (pred, now)
+        return int(pred)
+
     def on_anim(self):
         now = time.monotonic()
+        want = 16 if (self.lyrics and self.is_playing() and self.isVisible()
+                      and self.cfg.get("lyrics", True)) else 40     # текст песни — 60 кадров/с
+        if self.anim.interval() != want:
+            self.anim.setInterval(want)
         dt = min(0.1, now - self._last_anim)
         self._last_anim = now
         if self.boot_t0 is not None and not self._boot_sound_done and now - self.boot_t0 > 0.3:
@@ -3225,7 +3251,7 @@ class Mp3Widget(QWidget):
         m = 16
         playing = self.is_playing()
         dur = self.player.duration()
-        pos = self.player.position()
+        pos = self.smooth_pos()
         if self.scrub is not None and dur > 0:
             pos = int(self.scrub * dur)
         f_small = self.lcd_font(22)
