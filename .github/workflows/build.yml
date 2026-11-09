@@ -32,7 +32,7 @@ jobs:
           python -m pip install -r requirements.txt pyinstaller
 
       - name: Check that all modules import
-        run: python -c "import mp3player, skin_editor, lyrics, geom3d, radio, doulander_link, updater, lyrics_online, loudness, eq, dsp_player, weekly, weekly_ui, media_keys, panels, stats, spectrum, audio_engine, desktop_keeper, winassoc"
+        run: python -c "import mp3player, skin_editor, lyrics, geom3d, radio, doulander_link, updater, lyrics_online, loudness, eq, dsp_player, weekly, weekly_ui, smart, lrc_maker, media_keys, panels, stats, spectrum, audio_engine, desktop_keeper, winassoc"
 
       - name: Updater self-test (replaces files like a real update)
         env:
@@ -61,7 +61,9 @@ jobs:
         continue-on-error: true
         env:
           PYTHONIOENCODING: utf-8
-        run: python tests/ui_menu.py
+        run: |
+          python tests/ui_menu.py
+          python tests/ui_lrc.py
 
       - name: Stamp build number (for auto-update)
         shell: pwsh
@@ -76,7 +78,7 @@ jobs:
           --hidden-import geom3d --hidden-import radio --hidden-import doulander_link
           --hidden-import updater --hidden-import build_info --hidden-import lyrics_online --hidden-import loudness
           --collect-submodules mutagen --hidden-import eq --hidden-import dsp_player --collect-all av
-          --hidden-import weekly --hidden-import weekly_ui
+          --hidden-import weekly --hidden-import weekly_ui --hidden-import lrc_maker
           launch.py
 
       - name: Smoke test - the exe starts and keeps running

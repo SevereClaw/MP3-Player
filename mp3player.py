@@ -4554,6 +4554,46 @@ class Mp3Widget(QWidget):
         left = self.loud_worker.pending()
         nm.addAction(f"В очереди на замер: {left}" if left else "Все треки списка измерены").setEnabled(False)
 
+    # ------------------------------------------------------------ создание текста вручную
+    LRC_STYLE = """
+        QWidget { background:#141b1f; color:#e4ece8; font-family:'Segoe UI'; font-size:13px; }
+        QLabel#title { font-size:15px; color:#b8e0c8; }
+        QLabel#dim { color:#8aa39a; font-size:12px; }
+        QPlainTextEdit, QListWidget { background:#0e1417; border:1px solid #2f3d42; border-radius:6px;
+                                      font-size:14px; padding:4px; }
+        QListWidget::item { padding:3px 2px; }
+        QListWidget::item:selected { background:#b8e0c8; color:#142018; }
+        QPushButton { background:#22303a; border:1px solid #3a4a50; border-radius:6px; padding:5px 12px; }
+        QPushButton:hover { background:#2c3e48; }
+        QPushButton#accent { background:#b8e0c8; color:#142018; font-weight:bold; border:none; }
+        QSpinBox { background:#0e1417; border:1px solid #2f3d42; border-radius:4px; padding:2px; }
+    """
+
+    def open_lrc_maker(self):
+        path = self.loaded_path
+        if not path or self.radio:
+            self.flash("СНАЧАЛА ВКЛЮЧИ ПЕСНЮ")
+            return
+        from lrc_maker import LrcMakerWindow
+        w = LrcMakerWindow(self, path, self.title or display_name(path), self.artist, self.album,
+                           self.LRC_STYLE)
+        w.saved.connect(lambda lrc, p=path: self.on_lrc_made(p, lrc))
+        self._lrc_win = w
+        w.show()
+        w.raise_()
+        w.activateWindow()
+
+    def on_lrc_made(self, path, lrc):
+        if pkey(os.path.dirname(lrc)) != pkey(os.path.dirname(path)):     # не рядом с треком — привязать
+            links = self.cfg.setdefault("lrc_links", {})
+            links[npath(path)] = npath(lrc)
+        (self.cfg.get("lyrics_missing") or {}).pop(pkey(path), None)
+        self.cfg["lyrics"] = True
+        self.save_later()
+        if self.loaded_path and pkey(self.loaded_path) == pkey(path):
+            self.reload_lyrics(note=False)
+        self.flash("✍ ТЕКСТ СОХРАНЁН", 2.5)
+
     # ------------------------------------------------------------ тексты из интернета
     def fetch_lyrics_online(self, manual=False):
         path = self.loaded_path
@@ -4641,6 +4681,7 @@ class Mp3Widget(QWidget):
                 m.addAction("🌐  Найти текст в интернете (lrclib.net)" if not self.lyrics
                             else "🌐  Поискать другой текст в интернете",
                             lambda: self.fetch_lyrics_online(manual=True))
+                m.addAction("✍  Создать текст под эту песню (пробелом в такт)…", self.open_lrc_maker)
             m.addAction("📎  Привязать .lrc к этому треку…   (или перетащи .lrc на плеер)",
                         self.pick_lrc_for_track)
             if any(pkey(k) == pkey(p) for k in (self.cfg.get("lrc_links") or {})):
