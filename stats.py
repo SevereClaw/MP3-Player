@@ -29,6 +29,24 @@ class Stats:
         except Exception:
             pass
         self.dirty = False
+        self._repair_daily()
+
+    def _repair_daily(self):
+        """Сборки 11–14 теряли время трека за день (округляли каждый кусочек до 0,1 с).
+        Восстанавливаем примерно: включения × средняя длительность прослушивания трека."""
+        if self.data.get("daily_fix") == 1:
+            return
+        tracks = self.data.get("tracks") or {}
+        for day, items in (self.data.get("daily") or {}).items():
+            for path, d in items.items():
+                t = tracks.get(path) or {}
+                plays = max(1, int(t.get("plays") or 0))
+                avg = float(t.get("sec") or 0.0) / plays
+                est = int(d.get("p", 0)) * avg
+                if est > float(d.get("s", 0.0)):
+                    d["s"] = est
+        self.data["daily_fix"] = 1
+        self.dirty = True
 
     # ------------------------------------------------------------ запись
     def add_time(self, track, sec, title="", artist="", today=None):
@@ -43,7 +61,7 @@ class Stats:
         day = (today or _dt.date.today()).isoformat()
         self.data["days"][day] = self.data["days"].get(day, 0.0) + sec
         d = self._daily(day, track)                  # для итогов недели: что слушал в этот день
-        d["s"] = round(d.get("s", 0.0) + sec, 1)
+        d["s"] = d.get("s", 0.0) + sec               # без округления: кусочки по 0,02 с иначе теряются
         self.dirty = True
 
     def _daily(self, day, track):
@@ -66,6 +84,10 @@ class Stats:
         daily = self.data.get("daily") or {}
         for k in sorted(daily)[:-70]:            # потреково — последние 10 недель
             daily.pop(k, None)
+        for items in daily.values():             # в файл — с точностью до 0,1 с
+            for d in items.values():
+                if "s" in d:
+                    d["s"] = round(d["s"], 1)
         try:
             tmp = self.path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
