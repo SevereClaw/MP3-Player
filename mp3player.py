@@ -40,6 +40,7 @@ import updater
 import lyrics_online
 import loudness
 import weekly
+import smart
 
 APP_NAME = "MP3Player"
 APP_TITLE = "MP3 Плеер"
@@ -183,7 +184,7 @@ def pkey(p):
     return os.path.normcase(os.path.normpath(p)) if p else ""
 
 
-def scan_audio(paths, recursive=True):
+def scan_audio(paths, recursive=True, keep_order=False):
     out = []
     paths = [npath(p) for p in paths]
     for p in paths:
@@ -201,7 +202,8 @@ def scan_audio(paths, recursive=True):
                         out.append(npath(os.path.join(root, f)))
         elif os.path.isfile(p) and os.path.splitext(p)[1].lower() in AUDIO_EXT:
             out.append(p)
-    out.sort(key=natural_key)
+    if not keep_order:
+        out.sort(key=natural_key)
     return out
 
 
@@ -1186,8 +1188,8 @@ class Mp3Widget(QWidget):
 
     # ------------------------------------------------------------ playlist
     def load_sources(self, sources, start_path=None, start_pos=0, autoplay=True, fav=False, remember=True,
-                     flat=False):
-        files = scan_audio(sources, recursive=not flat)
+                     flat=False, smart_kind=None):
+        files = scan_audio(sources, recursive=not flat, keep_order=bool(smart_kind))
         if not files:
             self.flash("НЕТ АУДИОФАЙЛОВ")
             return
@@ -1209,6 +1211,7 @@ class Mp3Widget(QWidget):
         self.cfg["sources"] = sources
         self.cfg["sources_flat"] = flat
         self.cfg["fav_mode"] = fav
+        self.cfg["smart"] = smart_kind               # умный плейлист (или None)
         self.files = files
         self.rebuild_order(keep=None)
         idx = 0
@@ -1287,6 +1290,17 @@ class Mp3Widget(QWidget):
     def build_folders_menu(self):
         m = self.folders_menu
         m.clear()
+        self.stats.save()
+        sec = m.addAction("Умные плейлисты — собираются сами")
+        sec.setEnabled(False)
+        for kind, name in smart.LISTS:
+            n = "" if kind == "recent" else f"   ({len(smart.build(kind, self.stats.data, [], AUDIO_EXT))})"
+            a = m.addAction(name + n, lambda _=False, k=kind: self.play_smart(k))
+            a.setCheckable(True)
+            a.setChecked(self.cfg.get("smart") == kind)
+        if self.cfg.get("smart"):
+            m.addAction("↩  Вернуться к папке", lambda: self.play_smart(self.cfg["smart"]))
+        m.addSeparator()
         cur = self.current_folder()
         folders = self.cfg.get("folders", [])
         grp = QActionGroup(m)
@@ -1984,6 +1998,26 @@ class Mp3Widget(QWidget):
             return
         self.cfg["before_fav"] = self.current_folder()
         self.load_sources(favs, autoplay=True, fav=True)
+
+    def play_smart(self, kind):
+        """Умный плейлист; повторный выбор того же — назад к папке."""
+        if self.cfg.get("smart") == kind:
+            back = self.cfg.get("before_fav")
+            if back and os.path.isdir(back):
+                self.load_sources([back], autoplay=self.is_playing())
+            else:
+                self.flash("ВЫБЕРИ ПАПКУ")
+            return
+        self.stats.save()
+        files = smart.build(kind, self.stats.data, self.cfg.get("folders", []), AUDIO_EXT)
+        if not files:
+            self.flash({"often": "ПОКА МАЛО СТАТИСТИКИ", "month": "ЗА МЕСЯЦ ПУСТО",
+                        "forgotten": "ВСЁ СЛУШАЕШЬ — ЗАБЫТЫХ НЕТ", "recent": "В ПАПКАХ НЕТ МУЗЫКИ"}[kind], 3.0)
+            return
+        if not self.cfg.get("fav_mode"):
+            self.cfg["before_fav"] = self.current_folder()
+        self.load_sources(files, autoplay=True, fav=True, smart_kind=kind)
+        self.flash(smart.NAMES[kind].split("  ", 1)[-1].upper() + f" · {len(files)}", 2.5)
 
     # ------------------------------------------------------------ итоги
     def stats_pages(self):

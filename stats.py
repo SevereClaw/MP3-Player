@@ -71,6 +71,7 @@ class Stats:
         if track:
             t = self.data["tracks"].setdefault(track, {"sec": 0.0, "plays": 0})
             t["plays"] = t.get("plays", 0) + 1
+            t["last"] = _dt.date.today().isoformat()       # для «Давно не слушал»
             d = self._daily(_dt.date.today().isoformat(), track)
             d["p"] = d.get("p", 0) + 1
             self.dirty = True
