@@ -1878,9 +1878,12 @@ class Mp3Widget(QWidget):
             state = "playing" if self.is_playing() else "paused"
         pos = self.player.position() if path else 0
         lyric, has_ly = None, bool(self.lyrics)
+        nxt = (None, None)
         if self.lyrics:
             i = self.lyrics.index_at(pos)
             lyric = self.lyrics.lines[i] if i >= 0 else ""
+            if i + 1 < len(self.lyrics):            # следующая строка — Music → Discord пошлёт её вовремя
+                nxt = (self.lyrics.lines[i + 1], round(self.lyrics.times[i + 1] / 1000.0, 2))
         ab = (f"{fmt_time(self.ab_a)}–{fmt_time(self.ab_b)}" if self.ab_b is not None else "")
         snap = (state, path, self.title, self.artist, lyric, self.is_fav(path), ab, self.skin_id,
                 self._np_cover[1])
@@ -1892,7 +1895,7 @@ class Mp3Widget(QWidget):
             "v": 1, "app": "MP3 Плеер", "pid": os.getpid(), "updated": now, "state": state,
             "title": self.title, "artist": self.artist, "album": self.album, "path": path or "",
             "position": round(pos / 1000.0, 2), "length": round(max(0, self.player.duration()) / 1000.0, 2),
-            "lyric": lyric, "has_lyrics": has_ly, "fav": self.is_fav(path), "ab": ab,
+            "lyric": lyric, "lyric_next": nxt[0], "lyric_next_at": nxt[1], "has_lyrics": has_ly, "fav": self.is_fav(path), "ab": ab,
             "skin": self.skin_meta.get("name", self.skin_id),
             "cover_file": self._np_cover[0], "cover_hash": self._np_cover[1],
         }
