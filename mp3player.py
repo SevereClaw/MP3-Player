@@ -1784,7 +1784,7 @@ class Mp3Widget(QWidget):
                 pass
             emit("ready", (new_dir, rel["build"]))
         except Exception as e:
-            emit("error", f"{type(e).__name__}: {e}")
+            emit("error", updater.friendly_error(e))
 
     def on_update_event(self, kind, data):
         manual = self.upd_manual

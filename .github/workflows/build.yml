@@ -41,6 +41,11 @@ jobs:
           python tests/test_updater.py start
           python tests/test_updater.py check
 
+      - name: Update check without the GitHub API (live)
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python tests/test_release_check.py
+
       - name: Loudness measuring (Qt decoder + EBU R128)
         env:
           PYTHONIOENCODING: utf-8
