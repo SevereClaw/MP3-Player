@@ -62,6 +62,7 @@ def display_name(path):
 class PlaylistPanel(QWidget):
     play_index = Signal(int)
     download = Signal()
+    search_all = Signal()
 
     def __init__(self):
         super().__init__(None, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint |
@@ -103,6 +104,12 @@ class PlaylistPanel(QWidget):
         self.dl_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.dl_btn.clicked.connect(self.download.emit)
         head.addWidget(self.dl_btn)
+        self.all_btn = QPushButton("🔍 везде")
+        self.all_btn.setObjectName("favbtn")
+        self.all_btn.setToolTip("Искать во всей музыке, во всех папках (Ctrl+Alt+B)")
+        self.all_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.all_btn.clicked.connect(self.search_all.emit)
+        head.addWidget(self.all_btn)
         lay.addLayout(head)
 
         self.search = QLineEdit()
@@ -802,3 +809,350 @@ class WhatsNewPanel(QWidget):
         self.move(place_beside(anchor, self.size(), prefer_left=False))
         self.show()
         self.raise_()
+
+
+# ===================================================================== Поиск по всей музыке
+class SearchPanel(QWidget):
+    """Поиск по всем папкам плеера: пара букв — и трек найден, где бы он ни лежал."""
+    play_path = Signal(str)          # играть найденный трек (в его папке)
+    queue_path = Signal(str)         # играть следующим
+    edit_path = Signal(str)          # править теги
+    rescan = Signal()
+
+    def __init__(self, library):
+        super().__init__(None, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint |
+                         Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.NoDropShadowWindowHint)
+        from PySide6.QtWidgets import QPushButton
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.lib = library
+        self._files = None
+        frame = QFrame(self)
+        frame.setObjectName("panel")
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(frame)
+        lay = QVBoxLayout(frame)
+        lay.setContentsMargins(12, 10, 12, 10)
+        lay.setSpacing(8)
+
+        head = QHBoxLayout()
+        title = QLabel("ПОИСК ПО ВСЕЙ МУЗЫКЕ")
+        title.setObjectName("title")
+        head.addWidget(title)
+        head.addStretch(1)
+        self.count = QLabel("")
+        self.count.setObjectName("dim")
+        head.addWidget(self.count)
+        self.rescan_btn = QPushButton("⟳")
+        self.rescan_btn.setObjectName("favbtn")
+        self.rescan_btn.setToolTip("Пересканировать папки")
+        self.rescan_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.rescan_btn.clicked.connect(self.rescan.emit)
+        head.addWidget(self.rescan_btn)
+        close = QPushButton("✕")
+        close.setObjectName("favbtn")
+        close.setCursor(Qt.CursorShape.PointingHandCursor)
+        close.clicked.connect(self.hide)
+        head.addWidget(close)
+        lay.addLayout(head)
+
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Название, исполнитель, альбом или папка…")
+        self.search.setClearButtonEnabled(True)
+        self.search.textChanged.connect(self.run)
+        self.search.installEventFilter(self)
+        lay.addWidget(self.search)
+
+        self.list = QListWidget()
+        self.list.setUniformItemSizes(True)
+        self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.list.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.list.itemActivated.connect(lambda it: self._emit(self.play_path, it))
+        self.list.itemDoubleClicked.connect(lambda it: self._emit(self.play_path, it))
+        self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.list.customContextMenuRequested.connect(self._menu)
+        lay.addWidget(self.list, 1)
+
+        hint = QLabel("Enter / двойной клик — играть  ·  Ctrl+Enter — следующим  ·  F2 — теги")
+        hint.setObjectName("dim")
+        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(hint)
+        self.restyle()
+        self.resize(460, 520)
+        _live_panels.append(self)
+
+    def restyle(self):
+        PlaylistPanel.restyle(self)
+
+    def set_status(self):
+        n = len(self.lib)
+        self.count.setText(("сканирую… " if self.lib.scanning else "") + (f"{n} трек." if n else ""))
+
+    def run(self, text=None):
+        q = self.search.text() if text is None else text
+        self.list.clear()
+        self.set_status()
+        if not q.strip():
+            return
+        found = self.lib.search(q)
+        for p in found:
+            t, a, _al = self.lib.info(p)
+            if not t:
+                stem = os.path.splitext(os.path.basename(p))[0]
+                a2, t = (stem.split(" - ", 1) + [""])[:2] if " - " in stem else ("", stem)
+                a = a or a2
+            folder = os.path.basename(os.path.dirname(p))
+            it = QListWidgetItem(f"{t}" + (f"  —  {a}" if a else "") + f"   · {folder}")
+            it.setData(Qt.ItemDataRole.UserRole, p)
+            it.setToolTip(p)
+            self.list.addItem(it)
+        if found:
+            self.list.setCurrentRow(0)
+        else:
+            it = QListWidgetItem("ничего не нашлось" + ("  (ещё сканирую папки…)" if self.lib.scanning else ""))
+            it.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.list.addItem(it)
+        self.count.setText(f"найдено {len(found)}" + (" из " + str(len(self.lib)) if len(self.lib) else ""))
+
+    def _emit(self, sig, it):
+        p = it.data(Qt.ItemDataRole.UserRole) if it is not None else None
+        if p:
+            sig.emit(p)
+
+    def _menu(self, pt):
+        from PySide6.QtWidgets import QMenu
+        it = self.list.itemAt(pt)
+        if it is None or not it.data(Qt.ItemDataRole.UserRole):
+            return
+        m = QMenu(self)
+        m.addAction("▶  Играть", lambda: self._emit(self.play_path, it))
+        m.addAction("⏭  Играть следующим", lambda: self._emit(self.queue_path, it))
+        m.addAction("✎  Править теги…", lambda: self._emit(self.edit_path, it))
+        m.addAction("📂  Показать в папке", lambda: __import__("subprocess").Popen(
+            ["explorer", "/select,", it.data(Qt.ItemDataRole.UserRole)]))
+        m.exec(self.list.mapToGlobal(pt))
+
+    def open_near(self, anchor: QRect, text=""):
+        self.search.setText(text)
+        self.run()
+        self.move(place_beside(anchor, self.size(), prefer_left=True))
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.search.setFocus()
+        self.search.selectAll()
+
+    def eventFilter(self, obj, ev):
+        if obj is self.search and ev.type() == QEvent.Type.KeyPress:
+            k = ev.key()
+            if k in (Qt.Key.Key_Down, Qt.Key.Key_Up, Qt.Key.Key_PageDown, Qt.Key.Key_PageUp):
+                QCoreApplication.sendEvent(self.list, ev)
+                return True
+            if k in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                sig = self.queue_path if ev.modifiers() & Qt.KeyboardModifier.ControlModifier else self.play_path
+                self._emit(sig, self.list.currentItem())
+                return True
+            if k == Qt.Key.Key_F2:
+                self._emit(self.edit_path, self.list.currentItem())
+                return True
+        return super().eventFilter(obj, ev)
+
+    def keyPressEvent(self, ev):
+        if ev.key() == Qt.Key.Key_Escape:
+            self.hide()
+            return
+        if ev.key() == Qt.Key.Key_F2:
+            self._emit(self.edit_path, self.list.currentItem())
+            return
+        if ev.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            sig = self.queue_path if ev.modifiers() & Qt.KeyboardModifier.ControlModifier else self.play_path
+            self._emit(sig, self.list.currentItem())
+            return
+        super().keyPressEvent(ev)
+
+
+# ===================================================================== Правка тегов
+class TagEditor(QWidget):
+    """Название, исполнитель, альбом и обложка трека — прямо в плеере."""
+    saved = Signal(str, dict)        # путь, {'title','artist','album','cover': bytes|None,'remove_cover': bool}
+
+    def __init__(self):
+        super().__init__(None, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint |
+                         Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.NoDropShadowWindowHint)
+        from PySide6.QtWidgets import QPushButton, QGridLayout
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.path = None
+        self.cover = None            # байты новой обложки
+        self.old_cover = None
+        self.remove_cover = False
+        frame = QFrame(self)
+        frame.setObjectName("panel")
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(frame)
+        lay = QVBoxLayout(frame)
+        lay.setContentsMargins(16, 12, 16, 12)
+        lay.setSpacing(8)
+        title = QLabel("ТЕГИ ТРЕКА")
+        title.setObjectName("title")
+        lay.addWidget(title)
+        self.file = QLabel("")
+        self.file.setObjectName("dim")
+        self.file.setWordWrap(True)
+        lay.addWidget(self.file)
+
+        body = QHBoxLayout()
+        body.setSpacing(14)
+        left = QVBoxLayout()
+        self.art = QLabel()
+        self.art.setObjectName("art")
+        self.art.setFixedSize(150, 150)
+        self.art.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        left.addWidget(self.art)
+
+        def btn(text, fn, tip=""):
+            b = QPushButton(text)
+            b.setObjectName("favbtn")
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setToolTip(tip)
+            b.clicked.connect(fn)
+            return b
+        left.addWidget(btn("🖼 Выбрать картинку…", self.pick_cover))
+        left.addWidget(btn("📋 Вставить из буфера", self.paste_cover, "Скопируй картинку в браузере и нажми"))
+        left.addWidget(btn("✖ Убрать обложку", self.clear_cover))
+        left.addStretch(1)
+        body.addLayout(left)
+
+        grid = QGridLayout()
+        grid.setVerticalSpacing(6)
+        self.ed = {}
+        for row, (key, label) in enumerate((("title", "Название"), ("artist", "Исполнитель"), ("album", "Альбом"))):
+            lb = QLabel(label)
+            lb.setObjectName("dim")
+            grid.addWidget(lb, row * 2, 0)
+            e = QLineEdit()
+            e.returnPressed.connect(self.save)
+            grid.addWidget(e, row * 2 + 1, 0)
+            self.ed[key] = e
+        grid.addWidget(btn("Взять из имени файла («Исполнитель - Название»)", self.from_name), 6, 0)
+        grid.setRowStretch(7, 1)
+        body.addLayout(grid, 1)
+        lay.addLayout(body)
+
+        self.note = QLabel("")
+        self.note.setObjectName("dim")
+        self.note.setWordWrap(True)
+        lay.addWidget(self.note)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(btn("Отмена", self.hide))
+        ok = btn("Сохранить", self.save)
+        ok.setObjectName("okbtn")
+        row.addWidget(ok)
+        lay.addLayout(row)
+        self.restyle()
+        self.resize(520, 330)
+        _live_panels.append(self)
+
+    def restyle(self):
+        self.setStyleSheet(f"""
+            #panel {{ background:{BG}; border:1px solid {BORDER}; border-radius:12px; }}
+            QLabel {{ color:{TEXT}; font-family:{FONTS}; }}
+            #title {{ font-size:15px; font-weight:bold; color:{LCD}; letter-spacing:2px; }}
+            #dim {{ color:{DIM}; font-size:11px; }}
+            #art {{ background:#11171a; border:1px solid {BORDER}; border-radius:8px; color:{DIM}; }}
+            QLineEdit {{ background:{LCD}; color:{LCD_INK}; border:none; border-radius:6px;
+                         padding:6px 8px; font-family:{FONTS}; font-size:13px; font-weight:bold;
+                         selection-background-color:{LCD_INK}; selection-color:{LCD}; }}
+            #favbtn {{ background:transparent; color:{TEXT}; border:1px solid {BORDER}; border-radius:9px;
+                       padding:4px 10px; font-family:{FONTS}; font-size:11px; text-align:left; }}
+            #favbtn:hover {{ border-color:{LCD}; color:{LCD}; }}
+            #okbtn {{ background:{LCD}; color:{LCD_INK}; border:none; border-radius:9px;
+                      padding:5px 16px; font-family:{FONTS}; font-size:12px; font-weight:bold; }}
+        """)
+
+    def _show_art(self):
+        from PySide6.QtGui import QPixmap
+        data = None if self.remove_cover and not self.cover else (self.cover or self.old_cover)
+        pm = QPixmap()
+        if data and pm.loadFromData(data):
+            self.art.setPixmap(pm.scaled(148, 148, Qt.AspectRatioMode.KeepAspectRatio,
+                                         Qt.TransformationMode.SmoothTransformation))
+        else:
+            self.art.setPixmap(QPixmap())
+            self.art.setText("нет обложки")
+
+    def open_for(self, path, tags, anchor: QRect, writable=True):
+        self.path = path
+        self.cover, self.remove_cover = None, False
+        self.old_cover = tags.get("cover")
+        self.file.setText(path)
+        for k, e in self.ed.items():
+            e.setText(tags.get(k, ""))
+            e.setEnabled(writable)
+        self.note.setText("" if writable else "Этот формат не поддерживает теги — можно только посмотреть.")
+        self._show_art()
+        self.move(place_beside(anchor, self.size(), prefer_left=True))
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.ed["title"].setFocus()
+        self.ed["title"].selectAll()
+
+    def _set_cover_image(self, img):
+        """QImage → JPEG до 800 px (чтобы файл не раздувался)."""
+        from PySide6.QtCore import QBuffer, QIODevice
+        if img.isNull():
+            self.note.setText("Картинка не открылась.")
+            return
+        if max(img.width(), img.height()) > 800:
+            img = img.scaled(800, 800, Qt.AspectRatioMode.KeepAspectRatio,
+                             Qt.TransformationMode.SmoothTransformation)
+        buf = QBuffer()
+        buf.open(QIODevice.OpenModeFlag.WriteOnly)
+        img.convertToFormat(img.Format.Format_RGB32).save(buf, "JPG", 90)
+        self.cover, self.remove_cover = bytes(buf.data()), False
+        self.note.setText("Новая обложка — нажми «Сохранить».")
+        self._show_art()
+
+    def pick_cover(self):
+        from PySide6.QtWidgets import QFileDialog
+        from PySide6.QtGui import QImage
+        start = os.path.dirname(self.path or "")
+        fn, _ = QFileDialog.getOpenFileName(self, "Обложка", start, "Картинки (*.jpg *.jpeg *.png *.webp *.bmp)")
+        if fn:
+            self._set_cover_image(QImage(fn))
+
+    def paste_cover(self):
+        img = QGuiApplication.clipboard().image()
+        if img.isNull():
+            self.note.setText("В буфере нет картинки: в браузере — ПКМ по картинке → «Копировать изображение».")
+            return
+        self._set_cover_image(img)
+
+    def clear_cover(self):
+        self.cover, self.remove_cover = None, True
+        self.note.setText("Обложка будет убрана — нажми «Сохранить».")
+        self._show_art()
+
+    def from_name(self):
+        import library
+        a, t = library.guess_from_name(self.path or "")
+        if t:
+            self.ed["title"].setText(t)
+        if a:
+            self.ed["artist"].setText(a)
+
+    def save(self):
+        if not self.path or not self.ed["title"].isEnabled():
+            self.hide()
+            return
+        self.saved.emit(self.path, {
+            "title": self.ed["title"].text(), "artist": self.ed["artist"].text(),
+            "album": self.ed["album"].text(), "cover": self.cover, "remove_cover": self.remove_cover})
+
+    def keyPressEvent(self, ev):
+        if ev.key() == Qt.Key.Key_Escape:
+            self.hide()
+            return
+        super().keyPressEvent(ev)

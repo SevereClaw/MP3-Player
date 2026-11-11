@@ -233,6 +233,14 @@ class AudioEngine(QObject):
             self.pausing = False
             d.player.pause()
 
+    def release_all(self):
+        """Отпустить все файлы (чтобы в них можно было записать теги)."""
+        self.pausing = False
+        for d in self.decks:
+            d.on_done = None
+            d.player.stop()
+            d.player.setSource(QUrl())
+
     def stop(self):
         self.pausing = False
         d = self.cur

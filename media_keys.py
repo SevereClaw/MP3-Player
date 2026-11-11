@@ -173,6 +173,8 @@ HOTKEYS = [  # (id, модификаторы, клавиша, команда, п
     (14, MOD_CONTROL | MOD_ALT, ord("R"), "radio", "Ctrl+Alt+R — радио / обратно к музыке"),
     (15, MOD_CONTROL | MOD_ALT, ord("D"), "download", "Ctrl+Alt+D — скачать в плеер (Doulander)"),
     (16, MOD_CONTROL | MOD_ALT, ord("E"), "eq", "Ctrl+Alt+E — эквалайзер звука"),
+    (17, MOD_CONTROL | MOD_ALT, ord("B"), "search", "Ctrl+Alt+B — поиск по всей музыке"),
+    (18, MOD_CONTROL | MOD_ALT, ord("T"), "tags", "Ctrl+Alt+T — теги текущего трека"),
 ]
 # Запасной вариант: если системные медиа-сессии недоступны, ловим медиа-клавиши сами
 MEDIA_FALLBACK = [

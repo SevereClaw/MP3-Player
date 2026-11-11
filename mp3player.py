@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QMenu, QSystemTrayIcon,
 from PySide6.QtMultimedia import QMediaPlayer, QMediaMetaData, QSoundEffect
 
 from media_keys import SystemMedia, GlobalHotkeys, HOTKEYS, MEDIA_FALLBACK
-from panels import (PlaylistPanel, CoverPopup, NowPlayingToast, EqPanel, WhatsNewPanel, set_theme as panels_set_theme,
+from panels import (SearchPanel, TagEditor, PlaylistPanel, CoverPopup, NowPlayingToast, EqPanel, WhatsNewPanel, set_theme as panels_set_theme,
                     display_name)
 import eq as eqmod
 from audio_engine import AudioEngine
@@ -41,6 +41,7 @@ import lyrics_online
 import loudness
 import weekly
 import smart
+import library as libmod
 
 APP_NAME = "MP3Player"
 APP_TITLE = "MP3 Плеер"
@@ -625,6 +626,10 @@ class UpdateSignals(QObject):
     event = Signal(str, object)          # ("found"/"progress"/"ready"/"latest"/"error", данные)
 
 
+class LibrarySignals(QObject):
+    scanned = Signal()
+
+
 class WeeklySignals(QObject):
     done = Signal(bool, str, object)     # получилось?, текст, куда сообщить (или None)
 
@@ -803,6 +808,19 @@ class Mp3Widget(QWidget):
         self.playlist_panel = PlaylistPanel()
         self.playlist_panel.play_index.connect(self.play_index)
         self.playlist_panel.download.connect(lambda: (self.playlist_panel.hide(), self.download_dialog()))
+        self.playlist_panel.search_all.connect(self.open_search)
+        # поиск по всей музыке и правка тегов
+        self.library = libmod.Library(os.path.join(self.data_dir, "library.json"))
+        self.lib_sig = LibrarySignals()
+        self.lib_sig.scanned.connect(self.on_library_scanned)
+        self.search_panel = SearchPanel(self.library)
+        self.search_panel.play_path.connect(self.play_found)
+        self.search_panel.queue_path.connect(self.queue_next)
+        self.search_panel.edit_path.connect(self.edit_tags)
+        self.search_panel.rescan.connect(lambda: self.scan_library(force=True))
+        self.tag_editor = TagEditor()
+        self.tag_editor.saved.connect(self.save_tags)
+        QTimer.singleShot(8000, self.scan_library)
         self.cover_popup = CoverPopup()
         self.toast = NowPlayingToast()
         self.toast.clicked.connect(lambda: self.show_player())
@@ -1660,6 +1678,7 @@ class Mp3Widget(QWidget):
         if self.playlist_panel.isVisible():
             self.playlist_panel.set_tracks(self.files, self.current_index())
         self.update_tray_tip()
+        self.library.update(path)                    # новый трек сразу находится поиском
 
     def show_message(self, title, text):
         if hasattr(self, "tray") and self.tray.isVisible():
@@ -2141,6 +2160,131 @@ class Mp3Widget(QWidget):
                   ("ЗА ВСЁ ВРЕМЯ", fmt_dur(t["all_sec"])),
                   ("ПРОСЛУШИВАНИЙ", str(t["plays"]))])
 
+    # ------------------------------------------------------------ вся музыка: поиск и теги
+    def library_folders(self):
+        """Папки «Моей музыки»: список папок + то, что играет сейчас."""
+        out = [f for f in self.cfg.get("folders", []) if os.path.isdir(f)]
+        for s in self.cfg.get("sources") or []:
+            d = s if os.path.isdir(s) else os.path.dirname(s)
+            if d and os.path.isdir(d):
+                out.append(d)
+        dd = self.doulander_dir(ask=False)
+        if dd and os.path.isdir(dd):
+            out.append(dd)
+        # без вложенных дублей: C:\Music\Rock не нужен, если есть C:\Music
+        out = sorted({pkey(f): npath(f) for f in out}.values(), key=len)
+        roots = []
+        for f in out:
+            if not any(pkey(f).startswith(pkey(r).rstrip("\\/") + os.sep) for r in roots):
+                roots.append(f)
+        return roots
+
+    def scan_library(self, force=False):
+        if self.library.scanning:
+            return
+        if not force and self.library.scanned_at and time.time() - self.library.scanned_at < 600:
+            return
+        self.library.scan(self.library_folders(), done=self.lib_sig.scanned.emit)
+        if self.search_panel.isVisible():
+            self.search_panel.set_status()
+
+    def on_library_scanned(self):
+        if self.search_panel.isVisible():
+            self.search_panel.run()
+
+    def open_search(self):
+        if self.search_panel.isVisible():
+            self.search_panel.hide()
+            return
+        text = self.playlist_panel.search.text() if self.playlist_panel.isVisible() else ""
+        self.playlist_panel.hide()
+        self.search_panel.open_near(self.visual_rect(), text)
+        self.scan_library()
+
+    def play_found(self, path):
+        """Играть найденный трек: в его папке (если он уже в плейлисте — прямо там)."""
+        path = npath(path)
+        k = pkey(path)
+        for i, f in enumerate(self.files):
+            if pkey(f) == k and not self.radio:
+                self.play_index(i)
+                self.flash("▶ " + display_name(path), 2.0)
+                return
+        folder = os.path.dirname(path)
+        known = any(pkey(folder) == pkey(f) for f in self.cfg.get("folders", []))
+        self.load_sources([folder], start_path=path, autoplay=True, remember=known, flat=True)
+
+    def queue_next(self, path):
+        """Поставить трек сразу после текущего (не ломая плейлист)."""
+        path = npath(path)
+        if self.radio or not self.files:
+            self.play_found(path)
+            return
+        k = pkey(path)
+        idx = next((i for i, f in enumerate(self.files) if pkey(f) == k), None)
+        if idx is None:
+            self.files.append(path)
+            idx = len(self.files) - 1
+        else:
+            if idx in self.order:
+                pos = self.order.index(idx)
+                if pos == self.pos_in_order:
+                    self.flash("УЖЕ ИГРАЕТ")
+                    return
+                self.order.pop(pos)
+                if pos < self.pos_in_order:
+                    self.pos_in_order -= 1
+        self.order.insert(self.pos_in_order + 1, idx)
+        self.flash("⏭ СЛЕДУЮЩИМ: " + display_name(path), 2.5)
+        if self.playlist_panel.isVisible():
+            self.playlist_panel.set_tracks(self.files, self.current_index())
+
+    def edit_tags(self, path=None):
+        path = path or (None if self.radio else self.current_path())
+        if not path or not os.path.isfile(path):
+            self.flash("НЕТ ТРЕКА")
+            return
+        self.tag_editor.open_for(path, libmod.read_tags(path), self.visual_rect(), libmod.can_write(path))
+
+    def save_tags(self, path, d):
+        """Записать теги. Если трек сейчас играет — отпустить файл, записать и продолжить с того же места."""
+        current = self.loaded_path and pkey(self.loaded_path) == pkey(path)
+        was_playing = current and self.is_playing()
+        pos = self.player.position() if current else 0
+        if current:
+            self.player.release_all()
+        attempts = [0]
+
+        def write():
+            try:
+                libmod.write_tags(path, d["title"], d["artist"], d["album"], d.get("cover"),
+                                  d.get("remove_cover", False))
+            except PermissionError:
+                attempts[0] += 1
+                if attempts[0] < 6:                     # Windows отпускает файл не сразу
+                    QTimer.singleShot(300, write)
+                    return
+                self.tag_editor.note.setText("Файл занят другой программой — закрой её и попробуй ещё раз.")
+                finish(False)
+                return
+            except Exception as e:
+                self.tag_editor.note.setText(f"Не записалось: {e}")
+                finish(False)
+                return
+            self.library.update(path)
+            self.tag_editor.hide()
+            self.flash("✎ ТЕГИ СОХРАНЕНЫ", 2.0)
+            if self.search_panel.isVisible():
+                self.search_panel.run()
+            finish(True)
+
+        def finish(_ok):
+            if current:
+                self.load_current(autoplay=was_playing, seek=max(1, pos))
+                self.queue_loudness()
+
+        QTimer.singleShot(250 if current else 0, write)
+
     def open_playlist(self):
         if not self.files:
             self.open_folder()
@@ -2345,6 +2489,10 @@ class Mp3Widget(QWidget):
             self.leave_radio() if self.radio else self.play_radio()
         elif cmd == "eq":
             self.open_eq()
+        elif cmd == "search":
+            self.open_search()
+        elif cmd == "tags":
+            self.edit_tags()
         elif cmd == "download":
             self.download_dialog()
         elif cmd == "mini":
@@ -3696,6 +3844,7 @@ class Mp3Widget(QWidget):
         dd = self.doulander_dir(ask=False)
         dlm.addAction(("Doulander: " + dd) if dd else "Где Doulander?…", self.choose_doulander)
         m.addAction("📜  Плейлист", self.open_playlist)
+        m.addAction("🔍  Поиск по всей музыке   (Ctrl+Alt+B)", self.open_search)
         m.addSeparator()
         self.act_play = m.addAction("⏯  Играть / Пауза", self.toggle_play)
         pb = m.addMenu("🎵  Воспроизведение")
@@ -3714,6 +3863,7 @@ class Mp3Widget(QWidget):
         m.addSeparator()
         self.act_showhide = m.addAction("🙈  Спрятать (останется в трее)", self.toggle_visible)
         m.addAction("✖  Выход", self.quit)
+        pb.addAction("✎  Теги трека: название, исполнитель, обложка…   (Ctrl+Alt+T)", self.edit_tags)
         fv = pb.addMenu("❤  Избранное")
         self.act_fav = fv.addAction("♥  В избранное   (двойной клик по экрану)", self.toggle_favorite)
         self.act_fav_play = fv.addAction("Слушать избранное", self.play_favorites)
