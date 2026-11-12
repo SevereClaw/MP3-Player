@@ -7,6 +7,7 @@
 import hashlib
 import math
 import os
+import sys
 import threading
 import time
 
@@ -14,7 +15,7 @@ from PySide6.QtCore import (Qt, QTimer, QRect, QRectF, QPointF, QSize, QObject, 
                             QAbstractListModel, QBuffer, QIODevice, QEvent)
 from PySide6.QtGui import (QPainter, QColor, QFont, QFontMetrics, QPixmap, QImage, QPolygonF, QLinearGradient,
                            QPainterPath, QPen, QBrush, QIcon, QTransform)
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QListView,
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QListView, QFrame,
                                QStackedWidget, QStyledItemDelegate, QStyle, QSlider, QAbstractItemView,
                                QPushButton, QMenu, QSizePolicy, QApplication)
 
@@ -734,7 +735,9 @@ class NowPlaying(QWidget):
         box = QRectF(x, top, w, r.height() - top - 30)
         if lyr is not None and len(lyr):
             sp = getattr(o, "smooth_pos", None)
-            pos = sp() if callable(sp) else o.player.position()
+            pos = sp() if callable(sp) else None
+            if not isinstance(pos, (int, float)):
+                pos = o.player.position()
             i = max(0, lyr.index_at(pos))
             n = len(lyr)
             line_h = 44
@@ -1016,6 +1019,361 @@ class PlayerBar(QWidget):
 
 
 # ---------------------------------------------------------------- окно
+
+# ---------------------------------------------------------------- настройки
+class P3Toggle(QWidget):
+    """Переключатель: скошенная дорожка, голубая, когда включено."""
+    toggled = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self.setFixedSize(74, 30)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.on = False
+        self.x = 0.0
+        self.enabled_ = True
+        self._first = True
+        self._anim = QTimer(self, interval=16)
+        self._anim.timeout.connect(self._step)
+
+    def set_on(self, on, enabled=True):
+        self.on, self.enabled_ = bool(on), enabled
+        if self._first:                       # первый показ — сразу в нужном положении, без анимации
+            self._first = False
+            self.x = 1.0 if self.on else 0.0
+        elif not self._anim.isActive():
+            self._anim.start()
+        self.setCursor(Qt.CursorShape.PointingHandCursor if enabled else Qt.CursorShape.ArrowCursor)
+        self.update()
+
+    def _step(self):
+        t = 1.0 if self.on else 0.0
+        self.x += (t - self.x) * 0.3
+        if abs(t - self.x) < 0.01:
+            self.x = t
+            self._anim.stop()
+        self.update()
+
+    def mousePressEvent(self, e):
+        if self.enabled_ and e.button() == Qt.MouseButton.LeftButton:
+            self.toggled.emit()
+
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setOpacity(1.0 if self.enabled_ else 0.35)
+        r = QRectF(self.rect()).adjusted(2, 4, -2, -4)
+        g = QLinearGradient(r.topLeft(), r.topRight())
+        c0 = QColor(WHITE)
+        c1 = QColor(CYAN)
+        off = QColor("#16295c")
+        mix = lambda a, b, t: QColor(int(a.red() + (b.red() - a.red()) * t), int(a.green() + (b.green() - a.green()) * t),
+                                     int(a.blue() + (b.blue() - a.blue()) * t))
+        g.setColorAt(0, mix(off, c0, self.x))
+        g.setColorAt(1, mix(off, c1, self.x))
+        p.setPen(QPen(CYAN_D if self.x < 0.5 else CYAN, 2))
+        p.setBrush(g)
+        p.drawPolygon(skew_poly(r, 8))
+        kw = 26
+        kx = r.left() + 6 + (r.width() - kw - 12) * self.x
+        knob = QRectF(kx, r.top() + 4, kw, r.height() - 8)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(NAVY if self.x > 0.5 else WHITE)
+        p.drawPolygon(skew_poly(knob, 5))
+        p.end()
+
+
+class P3Chip(QPushButton):
+    """Вариант выбора — маленькая скошенная плашка."""
+
+    def __init__(self, text):
+        super().__init__(text)
+        self.setCheckable(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedHeight(30)
+        fm = QFontMetrics(pfont(13))
+        self.setFixedWidth(fm.horizontalAdvance(text) + 36)
+        self._hover = False
+
+    def enterEvent(self, _e):
+        self._hover = True
+        self.update()
+
+    def leaveEvent(self, _e):
+        self._hover = False
+        self.update()
+
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setOpacity(1.0 if self.isEnabled() else 0.35)
+        r = QRectF(self.rect()).adjusted(1, 2, -1, -2)
+        on = self.isChecked()
+        if on:
+            g = QLinearGradient(r.topLeft(), r.topRight())
+            g.setColorAt(0, WHITE)
+            g.setColorAt(1, CYAN)
+            p.setBrush(g)
+        else:
+            p.setBrush(QColor(47, 211, 255, 45) if self._hover else QColor(255, 255, 255, 0))
+        p.setPen(QPen(CYAN if (on or self._hover) else CYAN_D, 1.5))
+        p.drawPolygon(skew_poly(r, 8))
+        p.setFont(pfont(13))
+        p.setPen(NAVY if on else WHITE)
+        p.drawText(r, Qt.AlignmentFlag.AlignCenter, self.text())
+        p.end()
+
+
+class P3Action(P3Chip):
+    def __init__(self, text):
+        super().__init__(text)
+        self.setCheckable(False)
+
+
+class SettingsPage(QWidget):
+    """Все настройки плеера — в медиатеке, крупно и по разделам."""
+
+    def __init__(self, win):
+        super().__init__()
+        from PySide6.QtWidgets import QScrollArea
+        self.win = win
+        self.o = win.owner
+        self.M = sys.modules.get(type(self.o).__module__)          # константы плеера (скорости, скины…)
+        self.syncers = []
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(22, 18, 6, 0)
+        outer.setSpacing(8)
+        h = QLabel("НАСТРОЙКИ")
+        h.setObjectName("h1")
+        outer.addWidget(h)
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll.setStyleSheet("QScrollArea, QScrollArea > QWidget > QWidget { background:transparent; }")
+        body = QWidget()
+        self.lay = QVBoxLayout(body)
+        self.lay.setContentsMargins(0, 0, 18, 30)
+        self.lay.setSpacing(2)
+        self.scroll.setWidget(body)
+        outer.addWidget(self.scroll, 1)
+        self.build()
+
+    # ---------- кирпичики
+    def section(self, title):
+        lb = QLabel(title)
+        lb.setObjectName("sec")
+        self.lay.addSpacing(16)
+        self.lay.addWidget(lb)
+        line = QFrame()
+        line.setFixedHeight(2)
+        line.setStyleSheet(f"background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 {CYAN.name()}, "
+                           f"stop:0.6 rgba(47,211,255,40), stop:1 transparent);")
+        self.lay.addWidget(line)
+        self.lay.addSpacing(4)
+
+    def _row(self, title, hint=""):
+        row = QWidget()
+        row.setObjectName("srow")
+        hl = QHBoxLayout(row)
+        hl.setContentsMargins(6, 6, 6, 6)
+        hl.setSpacing(12)
+        col = QVBoxLayout()
+        col.setSpacing(0)
+        t = QLabel(title)
+        t.setObjectName("stitle")
+        col.addWidget(t)
+        if hint:
+            hh = QLabel(hint)
+            hh.setObjectName("shint")
+            hh.setWordWrap(True)
+            col.addWidget(hh)
+        hl.addLayout(col, 1)
+        self.lay.addWidget(row)
+        return hl
+
+    def _after(self):
+        QTimer.singleShot(60, self.refresh)
+
+    def toggle(self, title, get, act, hint="", enabled=None):
+        hl = self._row(title, hint)
+        sw = P3Toggle()
+        sw.toggled.connect(lambda: (act(), self._after()))
+        hl.addWidget(sw)
+        self.syncers.append(lambda: sw.set_on(get(), enabled() if enabled else True))
+
+    def choice(self, title, options, get, act, hint=""):
+        hl = self._row(title, hint)
+        chips = []
+        box = QHBoxLayout()
+        box.setSpacing(4)
+        for key, label in options:
+            c = P3Chip(label)
+            c.clicked.connect(lambda _=False, k=key: (act(k), self._after()))
+            box.addWidget(c)
+            chips.append((key, c))
+        hl.addLayout(box)
+
+        def sync():
+            cur = get()
+            for k, c in chips:
+                c.setChecked(k == cur)
+        self.syncers.append(sync)
+
+    def actions(self, title, buttons, hint="", label_get=None):
+        hl = self._row(title, hint)
+        for text, fn in buttons:
+            b = P3Action(text)
+            b.clicked.connect(lambda _=False, fn=fn: (fn(), self._after()))
+            hl.addWidget(b)
+        if label_get:
+            t = hl.itemAt(0).layout().itemAt(0).widget()
+            self.syncers.append(lambda t=t: t.setText(label_get()))
+
+    # ---------- все разделы
+    def build(self):
+        o, M, cfg = self.o, self.M, (lambda k, d=None: self.o.cfg.get(k, d))
+
+        self.section("МЕДИАТЕКА")
+        self.toggle("Открывать медиатеку при запуске", lambda: cfg("start_library", True), o.toggle_lib_start,
+                    "Иначе при запуске — маленький плеер на рабочем столе")
+        self.actions("Папки с музыкой", [("+ ДОБАВИТЬ ПАПКУ", self.add_folder),
+                                         ("⟳ ПЕРЕСКАНИРОВАТЬ", lambda: o.scan_library(force=True))],
+                     "Отсюда медиатека берёт альбомы и исполнителей")
+        self.folders_box = QVBoxLayout()
+        self.folders_box.setSpacing(2)
+        self.lay.addLayout(self.folders_box)
+
+        self.section("ВОСПРОИЗВЕДЕНИЕ")
+        self.toggle("Перемешивание", lambda: o.shuffle, o.toggle_shuffle)
+        self.choice("Повтор", [("all", "ВЕСЬ СПИСОК"), ("one", "ОДИН ТРЕК"), ("off", "ВЫКЛ")],
+                    lambda: o.repeat, o.set_repeat)
+        self.choice("Переход между треками", [(ms, n.upper()) for n, ms in M.CROSSFADES.items()],
+                    lambda: int(cfg("crossfade", 4000)), o.set_crossfade,
+                    "Конец трека плавно перетекает в начало следующего")
+        self.toggle("Затухание при паузе", lambda: cfg("fade_pause", True), o.toggle_fade_pause)
+        self.toggle("Помнить место в длинных файлах (20+ мин)", lambda: cfg("resume_long", True), o.toggle_resume,
+                    "Аудиокниги, подкасты, миксы — продолжатся с того же места")
+
+        self.section("ЗВУК")
+        self.actions("Эквалайзер", [("🎚 ОТКРЫТЬ", o.open_eq)], "Ctrl+Alt+E")
+        self.choice("Выравнивание громкости", [(k, v[0].split(" (")[0].upper()) for k, v in o.NORM_MODES.items()],
+                    lambda: cfg("normalize", "spotify"), o.set_normalize,
+                    "Тихие и громкие треки звучат одинаково громко")
+
+        self.section("ТЕКСТ ПЕСЕН")
+        self.toggle("Показывать текст песни", lambda: cfg("lyrics", True), o.toggle_lyrics)
+        self.toggle("Искать тексты в интернете", lambda: cfg("lyrics_online", True), o.toggle_lyrics_online,
+                    "Если рядом с треком нет .lrc — найти на lrclib.net")
+        self.actions("Свой текст под песню", [("✍ СОЗДАТЬ", o.open_lrc_maker)],
+                     "Для того, что играет сейчас: пробелом в такт")
+
+        self.section("МАЛЕНЬКИЙ ПЛЕЕР")
+        skins = [(sid, (meta.get("name", sid)).upper()) for sid, (_d, meta) in o.find_skins().items()]
+        self.choice("Скин", skins, lambda: o.skin_id, o.set_skin)
+        self.choice("Подсветка экрана", [(n, n) for n in M.THEMES], lambda: cfg("theme", "ЗЕЛЁНАЯ"), o.set_theme)
+
+        def cur_size():
+            base = o.auto_scale_here()
+            return next((v for v in M.SIZES.values() if abs(base * v - o.scale_f) < 0.011), None)
+        self.choice("Размер", [(v, n.upper()) for n, v in M.SIZES.items()], cur_size,
+                    lambda v: o.set_scale(o.auto_scale_here() * v), "Ещё можно Alt + колёсико над плеером")
+        self.choice("Где показывать", [(True, "НА РАБОЧЕМ СТОЛЕ"), (False, "ПОВЕРХ ВСЕХ ОКОН")],
+                    lambda: o.on_desktop, o.set_mode)
+        self.toggle("Не прятаться по Win+D", lambda: cfg("keep_desktop", True), o.toggle_keep_desktop,
+                    enabled=lambda: o.on_desktop and o.keeper.ok)
+        self.toggle("Показывать в панели задач", lambda: cfg("taskbar", False), o.toggle_taskbar)
+        self.toggle("Мини-режим", lambda: bool(cfg("mini")), lambda: o.set_mini(not cfg("mini")), "Ctrl+Alt+M")
+        self.toggle("Заставка HELLO при запуске", lambda: cfg("boot_anim", True),
+                    lambda: o.toggle_cfg("boot_anim", "ЗАСТАВКА"))
+        self.toggle("3D-корпус: наклон при перемещении", lambda: cfg("three_d", True), o.toggle_3d)
+        self.toggle("3D: наклоняться за курсором", lambda: cfg("tilt_hover", False),
+                    lambda: o.toggle_cfg("tilt_hover", "НАКЛОН ЗА КУРСОРОМ"), enabled=lambda: cfg("three_d", True))
+        self.toggle("Эквалайзер на экранчике", lambda: cfg("eq", True), lambda: o.toggle_cfg("eq", "ЭКВАЛАЙЗЕР"))
+        self.toggle("…по настоящему звуку", lambda: cfg("eq_real", True), lambda: o.toggle_cfg("eq_real", "СПЕКТР"),
+                    enabled=lambda: o.spectrum.available)
+        self.toggle("Звук кнопок", lambda: cfg("click_sound", True), lambda: o.toggle_cfg("click_sound", "ЗВУК КНОПОК"))
+        self.choice("Звуки", [("beep", "ПИСК"), ("classic", "ЩЕЛЧКИ")], lambda: cfg("sound_theme", "beep"),
+                    o.set_sound_theme)
+        self.choice("Громкость звуков", [(v, n.upper()) for n, v in M.SFX_LEVELS.items()],
+                    lambda: next((v for v in M.SFX_LEVELS.values() if abs(v - float(cfg("sfx_volume", 0.5))) < 0.01), None),
+                    o.set_sfx_volume)
+        self.toggle("Всплывающая обложка", lambda: cfg("cover_popup", True), o.toggle_cover_popup)
+        self.choice("Окошко «Сейчас играет»", [("hidden", "КОГДА ПЛЕЕР СПРЯТАН"), ("always", "ВСЕГДА"), ("off", "ВЫКЛ")],
+                    lambda: cfg("toast", "hidden"), o.set_toast_mode)
+
+        self.section("DISCORD И WINDOWS")
+        self.toggle("Показывать в Discord (Music → Discord)", lambda: cfg("discord_link", True), o.toggle_discord_link)
+        self.toggle("Горячие клавиши", lambda: cfg("hotkeys", True), o.toggle_hotkeys,
+                    "Ctrl+Alt+Пробел — пауза  ·  Ctrl+Alt+→ / ← — треки  ·  Ctrl+Alt+O — медиатека  ·  "
+                    "Ctrl+Alt+B — поиск  ·  Ctrl+Alt+T — теги")
+        self.toggle("Запускать вместе с Windows", lambda: M.Autostart.enabled(), o.toggle_autostart,
+                    "При включении компьютера — тихо, в трей, с маленьким плеером")
+        self.actions("Открывать музыку в MP3 Плеере", [("➕ ДОБАВИТЬ В WINDOWS", o.assoc_register),
+                                                       ("⭐ ПО УМОЛЧАНИЮ", o.assoc_make_default)],
+                     "«Открыть с помощью» и двойной клик по mp3 / flac")
+
+        self.section("ОБНОВЛЕНИЯ")
+        self.toggle("Обновляться автоматически", lambda: cfg("auto_update", True), o.toggle_auto_update)
+        self.actions("Сборка", [("⬆ ПРОВЕРИТЬ", lambda: o.check_update(manual=True)),
+                                ("ЧТО НОВОГО", lambda: o.show_whats_new(max(0, o.build - 5), manual=True))],
+                     label_get=lambda: f"Сборка {o.build}" if o.build else "Запущено из исходников")
+
+        self.section("ИТОГИ И ПРОЧЕЕ")
+        self.actions("Статистика прослушиваний", [("📊 ИТОГИ НЕДЕЛИ", o.open_weekly),
+                                                  ("СБРОСИТЬ…", o.reset_stats)])
+        self.actions("Если что-то не работает", [("🛠 ДИАГНОСТИКА", o.show_diagnostics)])
+        self.lay.addStretch(1)
+
+    # ---------- папки
+    def add_folder(self):
+        from PySide6.QtWidgets import QFileDialog
+        d = QFileDialog.getExistingDirectory(self, "Папка с музыкой", os.path.expanduser("~\\Music"))
+        if not d:
+            return
+        d = os.path.normpath(d)
+        folders = self.o.cfg.setdefault("folders", [])
+        if not any(os.path.normcase(f) == os.path.normcase(d) for f in folders):
+            folders.append(d)
+            self.o.save_later()
+        self.o.scan_library(force=True)
+
+    def remove_folder(self, d):
+        folders = self.o.cfg.get("folders", [])
+        self.o.cfg["folders"] = [f for f in folders if os.path.normcase(f) != os.path.normcase(d)]
+        self.o.save_later()
+        self.o.scan_library(force=True)
+        self._after()
+
+    def _sync_folders(self):
+        while self.folders_box.count():
+            it = self.folders_box.takeAt(0)
+            if it.widget():
+                it.widget().deleteLater()
+        for d in self.o.cfg.get("folders", []):
+            row = QWidget()
+            hl = QHBoxLayout(row)
+            hl.setContentsMargins(26, 0, 6, 0)
+            lb = QLabel(("📁  " if os.path.isdir(d) else "⚠  ") + d)
+            lb.setObjectName("shint")
+            hl.addWidget(lb, 1)
+            x = P3Action("✖ УБРАТЬ")
+            x.clicked.connect(lambda _=False, d=d: self.remove_folder(d))
+            hl.addWidget(x)
+            self.folders_box.addWidget(row)
+
+    def refresh(self):
+        for f in self.syncers:
+            try:
+                f()
+            except Exception:
+                pass
+        self._sync_folders()
+
+    def showEvent(self, e):
+        self.refresh()
+        super().showEvent(e)
+
+
 class LibraryWindow(QWidget):
     """Большое окно «Медиатека». owner — Mp3Widget (плеер)."""
     closed = Signal()
@@ -1059,7 +1417,7 @@ class LibraryWindow(QWidget):
         sl.addSpacing(14)
         self.nav = {}
         for key, text in (("albums", "АЛЬБОМЫ"), ("artists", "ИСПОЛНИТЕЛИ"), ("tracks", "ВСЕ ТРЕКИ"),
-                          ("now", "СЕЙЧАС ИГРАЕТ")):
+                          ("now", "СЕЙЧАС ИГРАЕТ"), ("settings", "НАСТРОЙКИ")):
             b = NavButton(text)
             b.clicked.connect(lambda _=False, k=key: self.go(k))
             sl.addWidget(b)
@@ -1093,9 +1451,10 @@ class LibraryWindow(QWidget):
             lambda pt: self.track_menu(self.tracks_view, pt, self.tracks_paths))
         self.detail = DetailPage(self)
         self.now = NowPlaying(self)
+        self.settings = SettingsPage(self)
         for key, w, title in (("albums", self.albums_view, "АЛЬБОМЫ"), ("artists", self.artists_view, "ИСПОЛНИТЕЛИ"),
                               ("tracks", self.tracks_view, "ВСЕ ТРЕКИ"), ("detail", self.detail, None),
-                              ("now", self.now, None)):
+                              ("now", self.now, None), ("settings", self.settings, None)):
             page = w
             if title:
                 page = QWidget()
@@ -1130,6 +1489,11 @@ class LibraryWindow(QWidget):
             #logo {{ font-size:28px; font-weight:900; font-style:italic; color:{w}; letter-spacing:1px; }}
             #count {{ color:{d}; font-size:12px; font-style:italic; }}
             #h1 {{ font-size:34px; font-weight:900; font-style:italic; color:{w}; }}
+            #sec {{ font-size:20px; font-weight:900; font-style:italic; color:{c}; letter-spacing:1px; }}
+            #srow {{ background:transparent; }}
+            #srow:hover {{ background:rgba(47,211,255,18); }}
+            #stitle {{ font-size:15px; font-weight:bold; font-style:italic; color:{w}; }}
+            #shint {{ font-size:12px; font-style:italic; color:{d}; }}
             #bt {{ font-size:16px; font-weight:900; font-style:italic; }}
             #ba {{ font-size:13px; font-style:italic; color:{c}; }}
             #time {{ font-size:12px; font-weight:bold; color:{d}; min-width:38px; }}

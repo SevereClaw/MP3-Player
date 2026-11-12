@@ -52,13 +52,47 @@ class Player:
 lines = ["Baby boy, you stay the night", "Full moon, full life, I'm sinking in deep", "Ooh, I can feel the fire",
          "This feeling is the best of all", "And I believe that you can hear me", "Shine on, full moon",
          "Full moon, full life", "Tonight we're gonna dance"]
-owner = types.SimpleNamespace(
-    library=lib, player=Player(), title="Full Moon Full Life", artist="Atlus Sound Team",
-    album="Persona 3 Reload OST", _cover=covers[cur], loaded_path=cur,
-    lyrics=Lyrics([40000, 52000, 58000, 66000, 72000, 80000, 86000, 92000], lines),
-    is_playing=lambda: True, is_fav=lambda p: "Color" in p or "Война" in p, toggle_play=lambda: None,
-    step=lambda d: None, save_later=lambda: None, play_list=lambda *a, **k: None, queue_next=lambda p: None,
-    edit_tags=lambda p=None: None)
+CROSSFADES = {"Выключен": 0, "2 сек": 2000, "4 сек": 4000, "6 сек": 6000, "8 сек": 8000}
+SIZES = {"Маленький": 0.6, "Средний": 0.8, "Большой": 1.0, "Огромный": 1.25}
+THEMES = {"ЗЕЛЁНАЯ": 0, "ГОЛУБАЯ": 0, "ОРАНЖЕВАЯ": 0, "КРАСНАЯ": 0, "БЕЛАЯ": 0}
+SFX_LEVELS = {"Тихо": 0.25, "Средне": 0.5, "Громко": 0.85}
+HOTKEYS = []
+
+
+class Autostart:
+    @staticmethod
+    def enabled():
+        return True
+
+
+class FakeOwner:
+    """Плеер-заглушка: всё, чего нет, — пустые функции."""
+    NORM_MODES = {"off": ("Выключено", None), "spotify": ("Как Spotify (−14 LUFS)", -14.0),
+                  "quiet": ("Ровнее, но тише (−18 LUFS)", -18.0)}
+
+    def __init__(self):
+        self.library, self.player = lib, Player()
+        self.title, self.artist, self.album = "Full Moon Full Life", "Atlus Sound Team", "Persona 3 Reload OST"
+        self._cover, self.loaded_path = covers[cur], cur
+        self.lyrics = Lyrics([40000, 52000, 58000, 66000, 72000, 80000, 86000, 92000], lines)
+        self.cfg = {"folders": ["C:\\Music", "D:\\Аниме OST"], "crossfade": 4000, "theme": "ГОЛУБАЯ"}
+        self.shuffle, self.repeat, self.skin_id, self.scale_f, self.on_desktop, self.build = False, "all", "flash", 0.8, True, 23
+        self.keeper = types.SimpleNamespace(ok=True)
+        self.spectrum = types.SimpleNamespace(available=True)
+
+    def __getattr__(self, name):
+        return lambda *a, **k: None
+
+    def is_playing(self): return True
+    def smooth_pos(self): return self.player.position()
+    def is_fav(self, p): return "Color" in p or "Война" in p
+    def auto_scale_here(self): return 1.0
+    def find_skins(self):
+        return {"flash": ("", {"name": "Флешка"}), "pocket": ("", {"name": "Карманный"}),
+                "cassette": ("", {"name": "Кассета"})}
+
+
+owner = FakeOwner()
 print("start", flush=True)
 w = library_ui.LibraryWindow(owner, os.path.join(tmp, "covers"))
 for p, img in covers.items():
@@ -94,4 +128,7 @@ for _ in range(40):
     w.now.repaint(); app.processEvents(); _t.sleep(0.016)
 dump("lib_now_hover.jpg")
 w.search.setText("кино"); dump("lib_search.jpg")
+w.search.clear()
+w.go("settings"); dump("lib_settings.jpg")
+w.settings.scroll.verticalScrollBar().setValue(700); dump("lib_settings2.jpg")
 print("альбомов:", len(w.albums), "исполнителей:", len(w.artists))
