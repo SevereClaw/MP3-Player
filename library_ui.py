@@ -5,13 +5,15 @@
 те же теги, обложки, тексты .lrc и статистика. Окно только показывает и командует.
 """
 import hashlib
+import math
 import os
 import threading
+import time
 
 from PySide6.QtCore import (Qt, QTimer, QRect, QRectF, QPointF, QSize, QObject, Signal, QModelIndex,
                             QAbstractListModel, QBuffer, QIODevice, QEvent)
 from PySide6.QtGui import (QPainter, QColor, QFont, QFontMetrics, QPixmap, QImage, QPolygonF, QLinearGradient,
-                           QPainterPath, QPen, QBrush, QIcon)
+                           QPainterPath, QPen, QBrush, QIcon, QTransform)
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QListView,
                                QStackedWidget, QStyledItemDelegate, QStyle, QSlider, QAbstractItemView,
                                QPushButton, QMenu, QSizePolicy, QApplication)
@@ -574,6 +576,31 @@ class NowPlaying(QWidget):
         self._blur_key = None
         self._blur = None
         self.setMouseTracking(True)
+        # анимация: обложка «парит» под мышкой, текст плавно едет и перетекает
+        self.mouse = None
+        self.hover = 0.0
+        self.rx = self.ry = 0.0
+        self.scroll = None
+        self._last = time.monotonic()
+        self._t = 0.0
+        self._pm_key = None
+        self._pm = None
+        self.cover_rect = QRectF()
+
+    def mouseMoveEvent(self, e):
+        self.mouse = e.position()
+
+    def leaveEvent(self, _e):
+        self.mouse = None
+
+    def _cover_pm(self, img, side, seed):
+        key = (img.cacheKey() if img is not None else seed, side)
+        if key != self._pm_key:
+            self._pm_key = key
+            self._pm = (QPixmap.fromImage(img.scaled(side, side, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                                                     Qt.TransformationMode.SmoothTransformation)).copy(0, 0, side, side)
+                        if img is not None else placeholder(side, seed))
+        return self._pm
 
     def _cover_img(self):
         o = self.win.owner
@@ -615,20 +642,56 @@ class NowPlaying(QWidget):
             veil.setColorAt(1, QColor(3, 10, 31, 235))
             p.fillRect(r, veil)
 
-        # большая обложка, чуть повёрнутая
+        # ---- время кадра
+        now = time.monotonic()
+        dt = max(0.0, min(0.05, now - self._last))
+        self._last = now
+        self._t += dt
+
+        def ease(cur, target, speed):
+            return cur + (target - cur) * (1 - math.exp(-dt * speed))
+
+        # большая обложка: под мышкой поднимается, парит и наклоняется за курсором (3D)
         side = min(int(r.height() * 0.62), int(r.width() * 0.36))
         cx, cy = r.width() * 0.25, r.height() * 0.46
-        p.save()
-        p.translate(cx, cy)
-        p.rotate(-5)
+        self.cover_rect = QRectF(cx - side * 0.6, cy - side * 0.6, side * 1.2, side * 1.2)
+        over = self.mouse is not None and self.cover_rect.contains(self.mouse)
+        self.hover = ease(self.hover, 1.0 if over else 0.0, 7)
+        if over:
+            tx = max(-1.0, min(1.0, (self.mouse.x() - cx) / (side / 2)))
+            ty = max(-1.0, min(1.0, (self.mouse.y() - cy) / (side / 2)))
+        else:
+            tx = ty = 0.0
+        self.ry = ease(self.ry, tx * 16, 9)
+        self.rx = ease(self.rx, -ty * 13, 9)
+        hv = self.hover
+        bob = math.sin(self._t * 2.1) * 9 * hv
+        wob = math.sin(self._t * 1.4) * 1.6 * hv
+        tr = QTransform()
+        tr.translate(cx, cy - 14 * hv + bob)
+        tr.rotate(self.ry, Qt.Axis.YAxis)
+        tr.rotate(self.rx, Qt.Axis.XAxis)
+        tr.rotate(-5 * (1 - 0.5 * hv) + wob)
+        tr.scale(1 + 0.06 * hv, 1 + 0.06 * hv)
         art = QRectF(-side / 2, -side / 2, side, side)
+        p.save()
+        p.setTransform(tr)
         p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(0, 0, 0, int(70 + 50 * hv)))              # тень — дальше, когда «взлетает»
+        p.drawRect(art.translated(18 + 22 * hv - self.ry * 0.8, 22 + 26 * hv + self.rx * 0.8))
         p.setBrush(CYAN)
-        p.drawRect(art.translated(12, 12))
-        pm = (QPixmap.fromImage(img.scaled(side, side, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                                           Qt.TransformationMode.SmoothTransformation)).copy(0, 0, side, side)
-              if img is not None else placeholder(side, getattr(o, "title", "")))
-        p.drawPixmap(art.toRect(), pm)
+        p.drawRect(art.translated(12 + 6 * hv - self.ry * 0.4, 12 + 6 * hv + self.rx * 0.4))
+        p.drawPixmap(art.toRect(), self._cover_pm(img, side, getattr(o, "title", "")))
+        if hv > 0.01:                                                 # блик скользит за наклоном
+            gx = art.left() + art.width() * (0.5 - self.ry / 32)
+            gy = art.top() + art.height() * (0.5 + self.rx / 26)
+            g = QLinearGradient(QPointF(gx - side * 0.5, gy - side * 0.5), QPointF(gx + side * 0.5, gy + side * 0.5))
+            g.setColorAt(0.0, QColor(255, 255, 255, 0))
+            g.setColorAt(0.45, QColor(255, 255, 255, int(70 * hv)))
+            g.setColorAt(0.55, QColor(255, 255, 255, int(70 * hv)))
+            g.setColorAt(1.0, QColor(255, 255, 255, 0))
+            p.setBrush(g)
+            p.drawRect(art)
         p.restore()
 
         # название — крупно, курсивом, с голубой плашкой под исполнителем
@@ -670,46 +733,66 @@ class NowPlaying(QWidget):
         top = 232
         box = QRectF(x, top, w, r.height() - top - 30)
         if lyr is not None and len(lyr):
-            pos = o.player.position()
-            i = lyr.index_at(pos)
+            sp = getattr(o, "smooth_pos", None)
+            pos = sp() if callable(sp) else o.player.position()
+            i = max(0, lyr.index_at(pos))
             n = len(lyr)
             line_h = 44
-            rows = int(box.height() // line_h)
-            first = max(0, min(i - rows // 3, n - rows))
-            for k in range(first, min(n, first + rows)):
+            rows = max(1, int(box.height() // line_h))
+            # строки плавно «едут» к текущей, а не прыгают
+            if self.scroll is None or abs(self.scroll - i) > 6:
+                self.scroll = float(i)
+            self.scroll = ease(self.scroll, float(i), 7.5)
+            first = max(0.0, min(self.scroll - rows // 3, float(max(0, n - rows))))
+            p.save()
+            p.setClipRect(box.adjusted(-20, -6, 20, 0))
+            for k in range(max(0, int(first) - 1), min(n, int(first) + rows + 2)):
                 yy = box.top() + (k - first) * line_h
                 text = lyr.lines[k] or "♪"
-                if k == i:
-                    f = pfont(26)
-                    fm = QFontMetrics(f)
-                    tw = min(w, fm.horizontalAdvance(text) + 46)
-                    band = QRectF(x - 8, yy + 2, tw, line_h - 6)
+                fk = max(0.0, 1.0 - abs(k - self.scroll))             # насколько строка «текущая» (0..1)
+                edge = min(1.0, max(0.0, (yy - box.top() + line_h) / line_h),
+                           max(0.0, (box.bottom() - yy) / (line_h * 1.5)))   # мягкое исчезание у краёв
+                # один шрифт, а размер — масштабом: растёт плавно, без скачков по пикселям
+                sc = (19 + 7 * fk) / 26.0
+                f = pfont(26)
+                fm = QFontMetrics(f)
+                indent = 10 + 8 * fk
+                avail = (w - indent - 6) / sc
+                txt = fm.elidedText(text, Qt.TextElideMode.ElideRight, int(avail))
+                tw = fm.horizontalAdvance(txt)
+                if fk > 0.01:
+                    band = QRectF(x - 8, yy + 2, min(w, tw * sc + 46), line_h - 6)
                     p.setPen(Qt.PenStyle.NoPen)
-                    p.setBrush(QColor(47, 211, 255, 60))
+                    p.setBrush(QColor(47, 211, 255, int(60 * fk * edge)))
                     p.drawPolygon(skew_poly(band, 12))
-                    # заливка строки по ходу пения (как на экранчике плеера)
+                c = QColor(WHITE)
+                base = max(50, 190 - abs(k - self.scroll) * 35)
+                c.setAlpha(int((base + (255 - base) * fk) * edge))
+                p.save()
+                p.translate(x - 8 + indent, yy + line_h / 2)
+                p.scale(sc, sc)
+                local = QRectF(0, -line_h / (2 * sc), avail + 4, line_h / sc)
+                p.setFont(f)
+                p.setPen(c)
+                p.drawText(local, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, txt)
+                if k == i and fk > 0.01:
+                    # заливка строки по ходу пения, с мягким краем
                     t0 = lyr.times[k]
                     t1 = lyr.times[k + 1] if k + 1 < n else t0 + 4000
                     frac = max(0.0, min(1.0, (pos - t0) / max(1, t1 - t0)))
-                    p.setFont(f)
-                    p.setPen(WHITE)
-                    p.drawText(band.adjusted(18, 0, -6, 0), Qt.AlignmentFlag.AlignVCenter,
-                               fm.elidedText(text, Qt.TextElideMode.ElideRight, int(band.width() - 24)))
-                    p.save()
-                    p.setClipRect(QRectF(band.left(), band.top(), 18 + (band.width() - 24) * frac, band.height()))
-                    p.setPen(CYAN)
-                    p.drawText(band.adjusted(18, 0, -6, 0), Qt.AlignmentFlag.AlignVCenter,
-                               fm.elidedText(text, Qt.TextElideMode.ElideRight, int(band.width() - 24)))
-                    p.restore()
-                else:
-                    f = pfont(19, weight=QFont.Weight.Bold)
-                    fm = QFontMetrics(f)
-                    p.setFont(f)
-                    c = QColor(WHITE)
-                    c.setAlpha(max(50, 190 - abs(k - i) * 35))
-                    p.setPen(c)
-                    p.drawText(QRectF(x + 10, yy, w - 10, line_h), Qt.AlignmentFlag.AlignVCenter,
-                               fm.elidedText(text, Qt.TextElideMode.ElideRight, int(w - 10)))
+                    ex = tw * frac
+                    g = QLinearGradient(QPointF(ex - 30, 0), QPointF(ex + 2, 0))
+                    cc = QColor(CYAN)
+                    cc.setAlpha(int(255 * fk * edge))
+                    c2 = QColor(CYAN)
+                    c2.setAlpha(0)
+                    g.setColorAt(0, cc)
+                    g.setColorAt(1, c2)
+                    p.setClipRect(QRectF(-4, local.top(), max(0.0, ex + 6), local.height()), Qt.ClipOperation.IntersectClip)
+                    p.setPen(QPen(QBrush(g), 1))
+                    p.drawText(local, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, txt)
+                p.restore()
+            p.restore()
         else:
             p.setFont(pfont(18, weight=QFont.Weight.Bold))
             p.setPen(DIM)
@@ -1135,7 +1218,7 @@ class LibraryWindow(QWidget):
         self.stack.setCurrentWidget(self.pages[key])
         for k, b in self.nav.items():
             b.setChecked(k == key)
-        self.timer.setInterval(40 if key == "now" else 250)
+        self.timer.setInterval(16 if key == "now" else 250)      # «Сейчас играет» — 60 кадров в секунду
 
     def _state(self):
         w = self.stack.currentWidget()

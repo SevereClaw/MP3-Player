@@ -85,5 +85,13 @@ w.go("albums"); dump("lib_albums.jpg")
 w.go("artists"); dump("lib_artists.jpg")
 w.open_album(next(a for a in w.albums if a["title"].startswith("Persona"))); dump("lib_album.jpg")
 w.go("now"); dump("lib_now.jpg")
+from PySide6.QtCore import QPointF as _P
+import time as _t
+r = w.now.rect()
+side = min(int(r.height() * 0.62), int(r.width() * 0.36))
+w.now.mouse = _P(r.width() * 0.25 + side * 0.35, r.height() * 0.46 - side * 0.3)   # мышь над обложкой, правый верх
+for _ in range(40):
+    w.now.repaint(); app.processEvents(); _t.sleep(0.016)
+dump("lib_now_hover.jpg")
 w.search.setText("кино"); dump("lib_search.jpg")
 print("альбомов:", len(w.albums), "исполнителей:", len(w.artists))
