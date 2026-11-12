@@ -175,6 +175,7 @@ HOTKEYS = [  # (id, модификаторы, клавиша, команда, п
     (16, MOD_CONTROL | MOD_ALT, ord("E"), "eq", "Ctrl+Alt+E — эквалайзер звука"),
     (17, MOD_CONTROL | MOD_ALT, ord("B"), "search", "Ctrl+Alt+B — поиск по всей музыке"),
     (18, MOD_CONTROL | MOD_ALT, ord("T"), "tags", "Ctrl+Alt+T — теги текущего трека"),
+    (19, MOD_CONTROL | MOD_ALT, ord("O"), "library", "Ctrl+Alt+O — медиатека (альбомы, исполнители)"),
 ]
 # Запасной вариант: если системные медиа-сессии недоступны, ловим медиа-клавиши сами
 MEDIA_FALLBACK = [

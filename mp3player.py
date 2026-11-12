@@ -2214,6 +2214,33 @@ class Mp3Widget(QWidget):
         known = any(pkey(folder) == pkey(f) for f in self.cfg.get("folders", []))
         self.load_sources([folder], start_path=path, autoplay=True, remember=known, flat=True)
 
+    def open_library(self):
+        """Большое окно «Медиатека» в стиле Persona 3 Reload."""
+        if self.__dict__.get("library_win") is None:
+            from library_ui import LibraryWindow
+            self.library_win = LibraryWindow(self, os.path.join(self.data_dir, "covers"))
+        if self.library_win.isVisible() and not self.library_win.isMinimized():
+            self.library_win.hide()
+            return
+        if self.library_win.isMinimized():
+            self.library_win.showNormal()
+        self.scan_library()
+        self.library_win.open()
+
+    def play_list(self, files, start=None, shuffle=False):
+        """Играть список треков (альбом, исполнитель, найденное) в этом порядке."""
+        files = [npath(f) for f in files if os.path.isfile(f)]
+        if not files:
+            self.flash("ФАЙЛЫ НЕ НАЙДЕНЫ")
+            return
+        if shuffle:
+            if not self.shuffle:
+                self.toggle_shuffle()
+            start = random.choice(files)
+        if not self.cfg.get("fav_mode"):
+            self.cfg["before_fav"] = self.current_folder()
+        self.load_sources(files, start_path=start, autoplay=True, fav=True, smart_kind="library")
+
     def queue_next(self, path):
         """Поставить трек сразу после текущего (не ломая плейлист)."""
         path = npath(path)
@@ -2493,6 +2520,8 @@ class Mp3Widget(QWidget):
             self.open_search()
         elif cmd == "tags":
             self.edit_tags()
+        elif cmd == "library":
+            self.open_library()
         elif cmd == "download":
             self.download_dialog()
         elif cmd == "mini":
@@ -3844,6 +3873,7 @@ class Mp3Widget(QWidget):
         dd = self.doulander_dir(ask=False)
         dlm.addAction(("Doulander: " + dd) if dd else "Где Doulander?…", self.choose_doulander)
         m.addAction("📜  Плейлист", self.open_playlist)
+        m.addAction("🎧  Медиатека: альбомы, исполнители   (Ctrl+Alt+O)", self.open_library)
         m.addAction("🔍  Поиск по всей музыке   (Ctrl+Alt+B)", self.open_search)
         m.addSeparator()
         self.act_play = m.addAction("⏯  Играть / Пауза", self.toggle_play)

@@ -70,6 +70,7 @@ jobs:
           python tests/ui_menu.py
           python tests/ui_lrc.py
           python tests/ui_search.py
+          python tests/ui_library.py
 
       - name: Search all music + tag editing (mp3, flac, m4a, ogg, opus)
         env:
@@ -89,7 +90,7 @@ jobs:
           --hidden-import geom3d --hidden-import radio --hidden-import doulander_link
           --hidden-import updater --hidden-import build_info --hidden-import lyrics_online --hidden-import loudness
           --collect-submodules mutagen --hidden-import eq --hidden-import dsp_player --collect-all av
-          --hidden-import weekly --hidden-import weekly_ui --hidden-import lrc_maker --hidden-import library
+          --hidden-import weekly --hidden-import weekly_ui --hidden-import lrc_maker --hidden-import library --hidden-import library_ui
           launch.py
 
       - name: Smoke test - the exe starts and keeps running

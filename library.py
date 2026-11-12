@@ -27,7 +27,7 @@ def _first(v):
 
 def read_tags(path):
     """{'title', 'artist', 'album', 'cover': bytes|None, 'cover_mime'} — что есть в файле."""
-    out = {"title": "", "artist": "", "album": "", "cover": None, "cover_mime": ""}
+    out = {"title": "", "artist": "", "album": "", "cover": None, "cover_mime": "", "track": 0, "length": 0.0}
     try:
         import mutagen
         f = mutagen.File(path)
@@ -35,6 +35,10 @@ def read_tags(path):
         return out
     if f is None:
         return out
+    try:
+        out["length"] = float(getattr(f.info, "length", 0) or 0)
+    except Exception:
+        pass
     tags = f.tags
     ext = os.path.splitext(path)[1].lower()
     try:
@@ -44,6 +48,8 @@ def read_tags(path):
                 out[key] = str(fr.text[0]).strip() if fr is not None and fr.text else ""
             if not out["artist"] and tags.get("TPE2") is not None:
                 out["artist"] = str(tags.get("TPE2").text[0]).strip()
+            if tags.get("TRCK") is not None and tags.get("TRCK").text:
+                out["track"] = _num(tags.get("TRCK").text[0])
             pics = tags.getall("APIC")
             if pics:
                 pic = next((p for p in pics if p.type == 3), pics[0])
@@ -53,6 +59,9 @@ def read_tags(path):
                 out[key] = _first(tags.get(k))
             if not out["artist"]:
                 out["artist"] = _first(tags.get("aART"))
+            trkn = tags.get("trkn")
+            if trkn:
+                out["track"] = _num(trkn[0][0] if isinstance(trkn[0], tuple) else trkn[0])
             covr = tags.get("covr")
             if covr:
                 c = covr[0]
@@ -63,6 +72,7 @@ def read_tags(path):
                 out[key] = _first(tags.get(k))
             if not out["artist"]:
                 out["artist"] = _first(tags.get("albumartist"))
+            out["track"] = _num(_first(tags.get("tracknumber")))
             pics = list(getattr(f, "pictures", []) or [])
             if not pics and tags.get("metadata_block_picture"):
                 from mutagen.flac import Picture
@@ -77,6 +87,11 @@ def read_tags(path):
     except Exception:
         pass
     return out
+
+
+def _num(v):
+    m = re.match(r"\s*(\d+)", str(v or ""))
+    return int(m.group(1)) if m else 0
 
 
 def _mime_of(data):
@@ -187,6 +202,79 @@ def norm(s):
     return re.sub(r"[\s_\-–—.,()\[\]{}!?'\"«»:;/\\]+", " ", s).strip()
 
 
+def _entry(p, size, mtime):
+    t = read_tags(p)
+    return {"s": size, "m": mtime, "t": t["title"], "a": t["artist"], "al": t["album"],
+            "n": t["track"], "d": round(t["length"], 1)}
+
+
+# ------------------------------------------------------------------ альбомы и исполнители
+UNKNOWN_ARTIST = "Неизвестный исполнитель"
+VARIOUS = "Разные исполнители"
+
+
+def track_view(path, it):
+    """Что показывать для трека: название, исполнитель, альбом (пустые теги — из имени файла и папки)."""
+    ga, gt = guess_from_name(path)
+    title = it.get("t") or gt
+    artist = it.get("a") or ga or UNKNOWN_ARTIST
+    album = it.get("al") or os.path.basename(os.path.dirname(path)) or "Без альбома"
+    return title, artist, album
+
+
+def build_albums(items):
+    """[{'key','title','artist','tracks':[path…],'cover_path','duration'}] — альбомы по тегу «альбом»
+    (нет тега — по папке). Треки — по номеру, потом по имени файла."""
+    groups = {}
+    for p, it in items.items():
+        title, artist, album = track_view(p, it)
+        key = (norm(album), os.path.normcase(os.path.dirname(p)) if not it.get("al") else norm(album))
+        g = groups.setdefault(key, {"key": "|".join(key), "title": album, "artists": {}, "tracks": [],
+                                    "duration": 0.0})
+        g["tracks"].append(p)
+        g["artists"][artist] = g["artists"].get(artist, 0) + 1
+        g["duration"] += it.get("d") or 0
+    out = []
+    for g in groups.values():
+        arts = sorted(g.pop("artists").items(), key=lambda kv: -kv[1])
+        n = len(g["tracks"])
+        g["artist"] = arts[0][0] if arts and (len(arts) == 1 or arts[0][1] * 2 > n) else VARIOUS
+        g["tracks"].sort(key=lambda p: (items[p].get("n") or 9999, _natural(os.path.basename(p))))
+        g["cover_path"] = g["tracks"][0]
+        out.append(g)
+    out.sort(key=lambda g: (norm(g["artist"]) if g["artist"] != VARIOUS else "яяя", norm(g["title"])))
+    return out
+
+
+def build_artists(items, albums=None):
+    """[{'name','tracks':[…],'albums':[album…],'cover_path'}] — по алфавиту."""
+    albums = albums if albums is not None else build_albums(items)
+    by = {}
+    for p, it in items.items():
+        _t, artist, _al = track_view(p, it)
+        a = by.setdefault(norm(artist), {"name": artist, "tracks": [], "albums": []})
+        a["tracks"].append(p)
+    for al in albums:
+        seen = set()
+        for p in al["tracks"]:
+            k = norm(track_view(p, items[p])[1])
+            if k in by and k not in seen:
+                seen.add(k)
+                by[k]["albums"].append(al)
+    out = []
+    for a in by.values():
+        a["tracks"].sort(key=lambda p: (norm(track_view(p, items[p])[2]), items[p].get("n") or 9999,
+                                        _natural(os.path.basename(p))))
+        a["cover_path"] = a["albums"][0]["cover_path"] if a["albums"] else a["tracks"][0]
+        out.append(a)
+    out.sort(key=lambda a: (a["name"] == UNKNOWN_ARTIST, norm(a["name"])))
+    return out
+
+
+def _natural(s):
+    return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", s)]
+
+
 class Library:
     """Индекс всех треков из папок плеера. Скан — в фоне, поиск — мгновенный."""
 
@@ -251,11 +339,10 @@ class Library:
                     old = dict(self.items)
                 for p, (size, mtime) in seen.items():
                     it = old.get(p)
-                    if it and it.get("s") == size and it.get("m") == mtime:
+                    if it and it.get("s") == size and it.get("m") == mtime and "d" in it:
                         fresh[p] = it
                         continue
-                    t = read_tags(p)
-                    fresh[p] = {"s": size, "m": mtime, "t": t["title"], "a": t["artist"], "al": t["album"]}
+                    fresh[p] = _entry(p, size, mtime)
                 with self.lock:
                     self.items = fresh
                     self._rebuild_hay()
@@ -275,10 +362,8 @@ class Library:
             st = os.stat(p)
         except OSError:
             return
-        t = read_tags(p)
         with self.lock:
-            self.items[p] = {"s": st.st_size, "m": int(st.st_mtime), "t": t["title"], "a": t["artist"],
-                             "al": t["album"]}
+            self.items[p] = _entry(p, st.st_size, int(st.st_mtime))
             self._rebuild_hay()
         self.save()
 
