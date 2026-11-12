@@ -302,11 +302,11 @@ class Autostart:
     @staticmethod
     def command():
         if getattr(sys, "frozen", False):
-            return f'"{sys.executable}"'
+            return f'"{sys.executable}" --autostart'
         exe = sys.executable
         w = os.path.join(os.path.dirname(exe), "pythonw.exe")
         entry = os.path.join(os.path.dirname(os.path.abspath(__file__)), "launch.py")
-        return f'"{w if os.path.exists(w) else exe}" "{entry}"'
+        return f'"{w if os.path.exists(w) else exe}" "{entry}" --autostart'
 
     @classmethod
     def enabled(cls):
@@ -2214,18 +2214,43 @@ class Mp3Widget(QWidget):
         known = any(pkey(folder) == pkey(f) for f in self.cfg.get("folders", []))
         self.load_sources([folder], start_path=path, autoplay=True, remember=known, flat=True)
 
-    def open_library(self):
-        """Большое окно «Медиатека» в стиле Persona 3 Reload."""
+    def open_library(self, toggle=True):
+        """Медиатека — главное окно. Пока она открыта, маленький плеер спрятан;
+        закрыли её крестиком — программа остаётся в трее и снова виден маленький плеер."""
         if self.__dict__.get("library_win") is None:
             from library_ui import LibraryWindow
             self.library_win = LibraryWindow(self, os.path.join(self.data_dir, "covers"))
-        if self.library_win.isVisible() and not self.library_win.isMinimized():
-            self.library_win.hide()
+            self.library_win.setWindowIcon(QIcon(resource("icon.ico")))
+            self.library_win.closed.connect(self.on_library_closed)
+        lw = self.library_win
+        if toggle and lw.isVisible() and not lw.isMinimized() and lw.isActiveWindow():
+            lw.close()
             return
-        if self.library_win.isMinimized():
-            self.library_win.showNormal()
+        self.playlist_panel.hide()
+        self.search_panel.hide()
+        self.mini.hide()
+        self.hide()
+        if lw.isMinimized():
+            lw.showNormal()
         self.scan_library()
-        self.library_win.open()
+        lw.open()
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                ctypes.windll.user32.SetForegroundWindow(int(lw.winId()))
+            except Exception:
+                pass
+
+    def on_library_closed(self):
+        if QApplication.closingDown() or self.__dict__.get("_quitting"):
+            return
+        self.show_player()
+        if not self.cfg.get("lib_tray_hint"):
+            self.cfg["lib_tray_hint"] = True
+            self.save_later()
+            self.tray.showMessage("MP3 Плеер", "Медиатека закрыта — музыка играет дальше. "
+                                  "Открыть снова: клик по значку в трее или Ctrl+Alt+O.",
+                                  QIcon(resource("icon.ico")), 5000)
 
     def play_list(self, files, start=None, shuffle=False):
         """Играть список треков (альбом, исполнитель, найденное) в этом порядке."""
@@ -3849,6 +3874,7 @@ class Mp3Widget(QWidget):
     # ------------------------------------------------------------ menu / tray
     def build_menu(self):
         m = QMenu()
+        self._menu_first = m
         m.setStyleSheet("""
             QMenu { background:#20262a; color:#dfe8e4; border:1px solid #4a5560; padding:4px; }
             QMenu::item { padding:5px 34px 5px 22px; }
@@ -3856,6 +3882,11 @@ class Mp3Widget(QWidget):
             QMenu::separator { height:1px; background:#3a444c; margin:4px 8px; }
             QMenu::indicator { width:12px; height:12px; left:5px; }
         """)
+        act_lib = m.addAction("🎧  Открыть медиатеку   (Ctrl+Alt+O)", lambda: self.open_library(toggle=False))
+        f = act_lib.font()
+        f.setBold(True)
+        act_lib.setFont(f)
+        m.addSeparator()
         om = m.addMenu("📂  Открыть")
         om.addAction("Папку с музыкой…", self.open_folder)
         om.addAction("Файлы…", self.open_files)
@@ -3873,7 +3904,6 @@ class Mp3Widget(QWidget):
         dd = self.doulander_dir(ask=False)
         dlm.addAction(("Doulander: " + dd) if dd else "Где Doulander?…", self.choose_doulander)
         m.addAction("📜  Плейлист", self.open_playlist)
-        m.addAction("🎧  Медиатека: альбомы, исполнители   (Ctrl+Alt+O)", self.open_library)
         m.addAction("🔍  Поиск по всей музыке   (Ctrl+Alt+B)", self.open_search)
         m.addSeparator()
         self.act_play = m.addAction("⏯  Играть / Пауза", self.toggle_play)
@@ -4046,6 +4076,8 @@ class Mp3Widget(QWidget):
         self.assoc_menu = st_m.addMenu("🔗  Открывать музыку в MP3 Плеере")
         self.assoc_menu.aboutToShow.connect(self.build_assoc_menu)
         self.assoc_menu.menuAction().setVisible(sys.platform == "win32")
+        self.act_libstart = st_m.addAction("🎧  При запуске открывать медиатеку", self.toggle_lib_start)
+        self.act_libstart.setCheckable(True)
         self.act_auto = st_m.addAction("🚀  Запускать вместе с Windows", self.toggle_autostart)
         self.act_auto.setCheckable(True)
         self.act_auto.setVisible(sys.platform == "win32")
@@ -4066,6 +4098,7 @@ class Mp3Widget(QWidget):
         self.act_desk.setChecked(self.on_desktop)
         self.act_top.setChecked(not self.on_desktop)
         self.act_auto.setChecked(Autostart.enabled())
+        self.act_libstart.setChecked(bool(self.cfg.get("start_library", True)))
         self.act_mini.setChecked(bool(self.cfg.get("mini")))
         self.act_dc.setChecked(bool(self.cfg.get("discord_link", True)))
         self.act_cover.setChecked(bool(self.cfg.get("cover_popup", True)))
@@ -4113,10 +4146,7 @@ class Mp3Widget(QWidget):
     def on_tray(self, reason):
         if reason in (QSystemTrayIcon.ActivationReason.Trigger,
                       QSystemTrayIcon.ActivationReason.DoubleClick):
-            if self.isVisible() and reason == QSystemTrayIcon.ActivationReason.DoubleClick:
-                self.hide()
-            else:
-                self.show_player()
+            self.open_library(toggle=False)              # клик по значку — медиатека
         elif reason == QSystemTrayIcon.ActivationReason.MiddleClick:
             self.toggle_play()
         elif reason == QSystemTrayIcon.ActivationReason.Context:
@@ -4944,6 +4974,11 @@ class Mp3Widget(QWidget):
             self.flash("КЛАВИШИ: ВЫКЛ")
         self.save_later()
 
+    def toggle_lib_start(self):
+        self.cfg["start_library"] = not self.cfg.get("start_library", True)
+        self.flash("МЕДИАТЕКА ПРИ ЗАПУСКЕ: " + ("ВКЛ" if self.cfg["start_library"] else "ВЫКЛ"), 2.0)
+        self.save_later()
+
     def toggle_autostart(self):
         try:
             Autostart.set(not Autostart.enabled())
@@ -4962,6 +4997,9 @@ class Mp3Widget(QWidget):
         self._quit_now()
 
     def _quit_now(self):
+        self._quitting = True
+        if self.__dict__.get("library_win") is not None:
+            self.library_win.hide()
         if self.loud_worker is not None:
             self.loud_worker.stop()
             self.loud_cache.save()
@@ -5088,6 +5126,8 @@ def main():
         paths, inbox[:] = list(inbox), []
         if paths:
             w.open_from_shell(paths)
+        elif w.cfg.get("start_library", True):
+            w.open_library(toggle=False)         # запустили ещё раз — показать медиатеку
         else:
             w.show_player()
     flush_timer.timeout.connect(flush_inbox)
@@ -5117,10 +5157,16 @@ def main():
     if inbox:
         flush_inbox()                      # файл из проводника — играть сразу
 
-    w.show()
-    w.raise_()
+    lib_start = (w.cfg.get("start_library", True) and not shell_paths and "--autostart" not in sys.argv)
+    if lib_start:
+        QTimer.singleShot(0, lambda: w.open_library(toggle=False))
+    else:
+        w.show()
+        w.raise_()
 
     def first_show():
+        if lib_start:
+            return
         if w.cfg.get("mini"):
             w.set_mini(True)                   # закрыли в мини-режиме — в нём и открываемся
             return

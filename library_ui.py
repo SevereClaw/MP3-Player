@@ -935,6 +935,7 @@ class PlayerBar(QWidget):
 # ---------------------------------------------------------------- окно
 class LibraryWindow(QWidget):
     """Большое окно «Медиатека». owner — Mp3Widget (плеер)."""
+    closed = Signal()
 
     def __init__(self, owner, cache_dir):
         super().__init__(None, Qt.WindowType.Window)
@@ -981,6 +982,11 @@ class LibraryWindow(QWidget):
             sl.addWidget(b)
             self.nav[key] = b
         sl.addStretch(1)
+        mini = NavButton("▣  МАЛЕНЬКИЙ ПЛЕЕР", small=True)
+        mini.setFixedWidth(215)
+        mini.setToolTip("Спрятать медиатеку — останется маленький плеер на рабочем столе и значок в трее")
+        mini.clicked.connect(self.close)
+        sl.addWidget(mini)
         self.scan_lbl = QLabel("")
         self.scan_lbl.setObjectName("count")
         self.scan_lbl.setWordWrap(True)
@@ -1218,6 +1224,12 @@ class LibraryWindow(QWidget):
     def showEvent(self, e):
         self.timer.start()
         super().showEvent(e)
+
+    def closeEvent(self, e):
+        # крестик — не выход: окно прячется, программа живёт в трее с маленьким плеером
+        e.ignore()
+        self.hide()
+        self.closed.emit()
 
     def hideEvent(self, e):
         self.timer.stop()
