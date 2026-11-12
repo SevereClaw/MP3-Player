@@ -122,11 +122,18 @@ w.go("now"); dump("lib_now.jpg")
 from PySide6.QtCore import QPointF as _P
 import time as _t
 r = w.now.rect()
-side = min(int(r.height() * 0.62), int(r.width() * 0.36))
-w.now.mouse = _P(r.width() * 0.25 + side * 0.35, r.height() * 0.46 - side * 0.3)   # мышь над обложкой, правый верх
+side = min(int((r.height() - 132) * 0.74), int(r.width() * 0.32))
+w.now.mouse = _P(r.width() * 0.25 + side * 0.35, (r.height() - 132) * 0.5 - side * 0.3)   # мышь над обложкой, правый верх
 for _ in range(40):
     w.now.repaint(); app.processEvents(); _t.sleep(0.016)
 dump("lib_now_hover.jpg")
+w.now.mouse = None
+owner.wave_active = lambda: True
+owner.cfg["wave_mode"] = "fav"
+w.now.wave.sync()
+for _ in range(30):
+    w.now.wave.repaint(); w.now.repaint(); app.processEvents(); _t.sleep(0.016)
+dump("lib_wave.jpg")
 w.search.setText("кино"); dump("lib_search.jpg")
 w.search.clear()
 w.go("settings"); dump("lib_settings.jpg")

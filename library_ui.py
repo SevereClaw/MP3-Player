@@ -570,6 +570,136 @@ class DetailPage(QWidget):
 
 
 # ---------------------------------------------------------------- «Сейчас играет»
+
+# ---------------------------------------------------------------- «Моя волна»
+class WavePanel(QWidget):
+    """Кнопка «Моя волна» с живыми волнами и выбором характера, как в Яндекс Музыке."""
+
+    def __init__(self, win):
+        super().__init__()
+        self.win = win
+        self.o = win.owner
+        self.t = 0.0
+        self.amp = 0.3
+        self._last = time.monotonic()
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(14, 6, 10, 8)
+        lay.setSpacing(6)
+        top = QHBoxLayout()
+        top.setSpacing(6)
+        top.addStretch(1)
+        lay.addLayout(top)
+        lay.addSpacing(44)                       # тут бегут волны
+        chips = QHBoxLayout()
+        chips.setSpacing(4)
+        self.chips = {}
+        import mywave
+        for key, name in mywave.MODES.items():
+            c = P3Chip(name)
+            c.clicked.connect(lambda _=False, k=key: self.pick_mode(k))
+            chips.addWidget(c)
+            self.chips[key] = c
+        chips.addStretch(1)
+        lay.addLayout(chips)
+        row = top
+        self.go_btn = P3Action("▶  ЗАПУСТИТЬ")
+        self.go_btn.setFixedWidth(150)
+        self.go_btn.clicked.connect(self.toggle)
+        self.dis_btn = P3Action("👎  НЕ ТО")
+        self.dis_btn.clicked.connect(lambda: self.o.wave_dislike())
+        self.fav_btn = P3Action("♡  НРАВИТСЯ")
+        self.fav_btn.setFixedWidth(150)
+        self.fav_btn.clicked.connect(lambda: self.o.toggle_favorite())
+        for b in (self.dis_btn, self.fav_btn, self.go_btn):
+            row.addWidget(b)
+        self.sync()
+
+    def active(self):
+        try:
+            return bool(self.o.wave_active())
+        except Exception:
+            return False
+
+    def pick_mode(self, k):
+        if self.active() and self.o.cfg.get("wave_mode") == k:
+            return
+        self.o.cfg["wave_mode"] = k
+        if self.active():
+            self.o.start_wave(k)              # сменили характер — новая волна сразу
+        self.sync()
+
+    def toggle(self):
+        if self.active():
+            self.o.stop_wave()
+        else:
+            self.o.start_wave(self.o.cfg.get("wave_mode", "mix"))
+        QTimer.singleShot(100, self.sync)
+
+    def sync(self):
+        on = self.active()
+        mode = self.o.cfg.get("wave_mode", "mix")
+        for k, c in self.chips.items():
+            c.setChecked(k == mode)
+        self.go_btn.setText("■  ВЫКЛЮЧИТЬ" if on else "▶  ЗАПУСТИТЬ")
+        self.dis_btn.setVisible(on)
+        self.fav_btn.setVisible(on)
+        path = getattr(self.o, "loaded_path", None)
+        try:
+            liked = bool(path) and self.o.is_fav(path)
+        except Exception:
+            liked = False
+        self.fav_btn.setText("♥  В ИЗБРАННОМ" if liked else "♡  НРАВИТСЯ")
+
+    def paintEvent(self, _e):
+        now = time.monotonic()
+        dt = max(0.0, min(0.05, now - self._last))
+        self._last = now
+        on = self.active()
+        playing = False
+        try:
+            playing = bool(self.o.is_playing())
+        except Exception:
+            pass
+        target = 1.0 if (on and playing) else (0.45 if on else 0.22)
+        self.amp += (target - self.amp) * (1 - math.exp(-dt * 3))
+        self.t += dt * (0.6 + 1.4 * self.amp)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = QRectF(self.rect())
+        # волны: три синусоиды, бегут и дышат
+        mid = r.top() + 62
+        for i, (col, a, k, sp, wdt) in enumerate(((CYAN, 16, 0.016, 1.0, 3.0), (WHITE, 11, 0.022, -1.3, 2.0),
+                                                   (CYAN_D, 20, 0.011, 0.7, 2.0))):
+            path = QPainterPath()
+            amp = a * self.amp
+            for x in range(0, int(r.width()) + 1, 6):
+                env = math.sin(math.pi * x / max(1.0, r.width()))         # к краям волна затихает
+                y = mid + math.sin(x * k + self.t * 2.4 * sp + i) * amp * env \
+                    + math.sin(x * k * 2.3 - self.t * 1.7 * sp) * amp * 0.35 * env
+                if x == 0:
+                    path.moveTo(x, y)
+                else:
+                    path.lineTo(x, y)
+            c = QColor(col)
+            c.setAlpha(230 if i == 0 else 140)
+            p.setPen(QPen(c, wdt))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawPath(path)
+        # заголовок поверх волн
+        p.setFont(pfont(30))
+        p.setPen(WHITE)
+        p.drawText(QPointF(14, 34), "МОЯ ВОЛНА")
+        p.setFont(pfont(13))
+        p.setPen(CYAN)
+        if on:
+            import mywave
+            p.drawText(QPointF(214, 32), "ИГРАЕТ · " + mywave.MODES.get(self.o.cfg.get("wave_mode", "mix"), ""))
+        else:
+            p.setPen(DIM)
+            p.drawText(QPointF(214, 32), "бесконечный поток твоей музыки")
+        p.end()
+
+
 class NowPlaying(QWidget):
     def __init__(self, win):
         super().__init__()
@@ -587,6 +717,12 @@ class NowPlaying(QWidget):
         self._pm_key = None
         self._pm = None
         self.cover_rect = QRectF()
+        self.wave = WavePanel(win)
+        self.wave.setParent(self)
+
+    def resizeEvent(self, e):
+        self.wave.setGeometry(18, self.height() - 132, self.width() - 36, 124)
+        super().resizeEvent(e)
 
     def mouseMoveEvent(self, e):
         self.mouse = e.position()
@@ -653,8 +789,8 @@ class NowPlaying(QWidget):
             return cur + (target - cur) * (1 - math.exp(-dt * speed))
 
         # большая обложка: под мышкой поднимается, парит и наклоняется за курсором (3D)
-        side = min(int(r.height() * 0.62), int(r.width() * 0.36))
-        cx, cy = r.width() * 0.25, r.height() * 0.46
+        side = min(int((r.height() - 132) * 0.74), int(r.width() * 0.32))
+        cx, cy = r.width() * 0.25, (r.height() - 132) * 0.5
         self.cover_rect = QRectF(cx - side * 0.6, cy - side * 0.6, side * 1.2, side * 1.2)
         over = self.mouse is not None and self.cover_rect.contains(self.mouse)
         self.hover = ease(self.hover, 1.0 if over else 0.0, 7)
@@ -732,7 +868,7 @@ class NowPlaying(QWidget):
         # текст песни
         lyr = getattr(o, "lyrics", None)
         top = 232
-        box = QRectF(x, top, w, r.height() - top - 30)
+        box = QRectF(x, top, w, r.height() - top - 140)
         if lyr is not None and len(lyr):
             sp = getattr(o, "smooth_pos", None)
             pos = sp() if callable(sp) else None
@@ -1649,6 +1785,9 @@ class LibraryWindow(QWidget):
         self.bar.sync()
         if self.stack.currentWidget() is self.now:
             self.now.update()
+            self.now.wave.update()
+            if int(time.monotonic() * 4) % 2 == 0:
+                self.now.wave.sync()
         lp = getattr(self.owner, "loaded_path", None)
         if lp != self._last_path:
             self._last_path = lp

@@ -42,6 +42,7 @@ import loudness
 import weekly
 import smart
 import library as libmod
+import mywave as wavemod
 
 APP_NAME = "MP3Player"
 APP_TITLE = "MP3 Плеер"
@@ -1407,11 +1408,19 @@ class Mp3Widget(QWidget):
         self.update_tray_tip()
         self.sys_track_timer.start()
         self.refresh()
+        self._wave_started = time.monotonic()
+        if self.cfg.get("smart") == "wave":
+            QTimer.singleShot(0, self.wave_extend)
 
     def step(self, delta, user=True):
         if not self.order:
             self.flash("ПКМ → ОТКРЫТЬ ПАПКУ")
             return
+        # в «Моей волне» быстрое перелистывание — знак «не очень» (такие треки звучат реже)
+        if (delta > 0 and user and self.cfg.get("smart") == "wave" and self.loaded_path
+                and time.monotonic() - self.__dict__.get("_wave_started", 0) < 30):
+            d = self.cfg.setdefault("wave_dislikes", {})
+            d[self.loaded_path] = round(float(d.get(self.loaded_path, 0)) + 0.5, 1)
         # «Назад» после 3 секунд — в начало трека
         if delta < 0 and user and self.player.position() > 3000 and not self.radio:
             self.player.setPosition(0)
@@ -2252,7 +2261,70 @@ class Mp3Widget(QWidget):
                                   "Открыть снова: клик по значку в трее или Ctrl+Alt+O.",
                                   QIcon(resource("icon.ico")), 5000)
 
-    def play_list(self, files, start=None, shuffle=False):
+    # ------------------------------------------------------------ «Моя волна»
+    def wave_active(self):
+        return self.cfg.get("smart") == "wave" and not self.radio
+
+    def wave_batch(self, n, history, last_artist=""):
+        with self.library.lock:
+            items = {p: it for p, it in self.library.items.items()}
+        items = {p: it for p, it in items.items() if os.path.isfile(p)} if len(items) < 3000 else items
+        return wavemod.pick(items, self.stats.data.get("tracks") or {}, set(self.favorites()),
+                            self.cfg.get("wave_dislikes") or {}, history, self.cfg.get("wave_mode", "mix"),
+                            n=n, last_artist=last_artist, today_iso=datetime.date.today().isoformat())
+
+    def start_wave(self, mode=None):
+        """Бесконечный поток своей музыки под настроение (как «Моя волна»)."""
+        if mode:
+            self.cfg["wave_mode"] = mode
+        if not len(self.library):
+            self.scan_library(force=True)
+            self.flash("СОБИРАЮ МУЗЫКУ… ЕЩЁ РАЗ ЧЕРЕЗ МИНУТУ", 3.0)
+            return
+        self.stats.save()
+        batch = self.wave_batch(20, [])
+        if not batch:
+            self.flash("НЕЧЕГО ПОСТАВИТЬ", 2.5)
+            return
+        if self.shuffle:                          # порядок волна выбирает сама
+            self.toggle_shuffle()
+        self.play_list(batch, batch[0], smart_kind="wave")
+        self.flash("🌊 МОЯ ВОЛНА · " + wavemod.MODES.get(self.cfg.get("wave_mode", "mix"), ""), 2.5)
+
+    def wave_extend(self):
+        """Волна не кончается: когда впереди осталось мало — дописать ещё."""
+        if not self.wave_active() or not self.order:
+            return
+        if len(self.order) - self.pos_in_order > 4:
+            return
+        last = self.files[self.order[-1]] if self.order else ""
+        last_artist = libmod.track_view(last, self.library.items.get(last, {}))[1] if last else ""
+        more = self.wave_batch(15, list(self.files)[-400:], last_artist)
+        for p in more:
+            self.files.append(npath(p))
+            self.order.append(len(self.files) - 1)
+        if self.playlist_panel.isVisible():
+            self.playlist_panel.set_tracks(self.files, self.current_index())
+
+    def wave_dislike(self):
+        """«Не то» — убрать трек из волны (после двух раз — навсегда) и дальше."""
+        p = self.loaded_path
+        if not p:
+            return
+        d = self.cfg.setdefault("wave_dislikes", {})
+        d[p] = round(float(d.get(p, 0)) + 1, 1)
+        self.save_later()
+        self.flash("👎 РЕЖЕ ТАКОЕ", 1.5)
+        self.step(+1, user=False)
+
+    def stop_wave(self):
+        back = self.cfg.get("before_fav")
+        if back and os.path.isdir(back):
+            self.load_sources([back], autoplay=self.is_playing())
+        else:
+            self.cfg["smart"] = None
+
+    def play_list(self, files, start=None, shuffle=False, smart_kind="library"):
         """Играть список треков (альбом, исполнитель, найденное) в этом порядке."""
         files = [npath(f) for f in files if os.path.isfile(f)]
         if not files:
@@ -2264,7 +2336,7 @@ class Mp3Widget(QWidget):
             start = random.choice(files)
         if not self.cfg.get("fav_mode"):
             self.cfg["before_fav"] = self.current_folder()
-        self.load_sources(files, start_path=start, autoplay=True, fav=True, smart_kind="library")
+        self.load_sources(files, start_path=start, autoplay=True, fav=True, smart_kind=smart_kind)
 
     def queue_next(self, path):
         """Поставить трек сразу после текущего (не ломая плейлист)."""
