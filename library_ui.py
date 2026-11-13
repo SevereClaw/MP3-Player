@@ -1625,7 +1625,7 @@ class NavButton(QPushButton, _Clicky):
 
 
 class IconButton(QPushButton):
-    """⏮ ⏯ ⏭ — скошенные плашки."""
+    """⏮ ⏯ ⏭ и «перемешать» / «повтор» — скошенные плашки."""
 
     def __init__(self, kind, size=46):
         super().__init__()
@@ -1635,6 +1635,7 @@ class IconButton(QPushButton):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._hover = False
         self.playing = False
+        self.mode = ""               # повтор: off / all / one; перемешать: on / off
 
     def enterEvent(self, _e):
         self._hover = True
@@ -1662,7 +1663,48 @@ class IconButton(QPushButton):
         p.setPen(Qt.PenStyle.NoPen)
         c = r.center()
         s = r.height() * 0.22
-        if self.kind == "play":
+        if self.kind in ("repeat", "shuffle"):
+            on = self.mode not in ("off", "")
+            col = QColor(CYAN if on else WHITE)
+            col.setAlpha(255 if on else (200 if self._hover else 105))
+            pen = QPen(col, max(1.8, s * 0.28), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+            p.setPen(pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+
+            def head(tip, dx):                              # наконечник стрелки (dx: +1 вправо, −1 влево)
+                p.drawLine(tip, QPointF(tip.x() - dx * s * 0.55, tip.y() - s * 0.5))
+                p.drawLine(tip, QPointF(tip.x() - dx * s * 0.55, tip.y() + s * 0.5))
+            w2, h2 = s * 1.5, s * 0.8
+            if self.kind == "repeat":                       # две стрелки по кругу
+                path = QPainterPath()
+                path.moveTo(c.x() - w2, c.y() + h2 * 0.1)
+                path.lineTo(c.x() - w2, c.y() - h2 * 0.4)
+                path.quadTo(c.x() - w2, c.y() - h2, c.x() - w2 + h2 * 0.6, c.y() - h2)
+                path.lineTo(c.x() + w2 * 0.75, c.y() - h2)
+                path.moveTo(c.x() + w2, c.y() - h2 * 0.1)
+                path.lineTo(c.x() + w2, c.y() + h2 * 0.4)
+                path.quadTo(c.x() + w2, c.y() + h2, c.x() + w2 - h2 * 0.6, c.y() + h2)
+                path.lineTo(c.x() - w2 * 0.75, c.y() + h2)
+                p.drawPath(path)
+                head(QPointF(c.x() + w2 * 0.85, c.y() - h2), 1)
+                head(QPointF(c.x() - w2 * 0.85, c.y() + h2), -1)
+                if self.mode == "one":                      # «1» в середине — повтор одного трека
+                    f = pfont(max(9, int(s * 1.25)))
+                    p.setFont(f)
+                    p.drawText(QRectF(c.x() - w2, c.y() - h2, w2 * 2, h2 * 2), Qt.AlignmentFlag.AlignCenter, "1")
+            else:                                           # перемешать: две скрещённые стрелки
+                for sy in (1, -1):
+                    path = QPainterPath()
+                    path.moveTo(c.x() - w2, c.y() - sy * h2)
+                    path.cubicTo(c.x() - w2 * 0.2, c.y() - sy * h2, c.x() + w2 * 0.1, c.y() + sy * h2,
+                                 c.x() + w2 * 0.85, c.y() + sy * h2)
+                    p.drawPath(path)
+                    head(QPointF(c.x() + w2, c.y() + sy * h2), 1)
+            if on:                                          # точка под значком — «включено»
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(col)
+                p.drawEllipse(QPointF(c.x(), r.bottom() - 2.5), 2.2, 2.2)
+        elif self.kind == "play":
             if self.playing:
                 p.drawRect(QRectF(c.x() - s * 0.9, c.y() - s, s * 0.6, s * 2))
                 p.drawRect(QRectF(c.x() + s * 0.3, c.y() - s, s * 0.6, s * 2))
@@ -1719,10 +1761,14 @@ class PlayerBar(QWidget):
         self.prev = IconButton("prev", 38)
         self.play = IconButton("play", 44)
         self.next = IconButton("next", 38)
+        self.shuf = IconButton("shuffle", 34)
+        self.rep = IconButton("repeat", 34)
         self.prev.clicked.connect(lambda: win.owner.step(-1))
         self.play.clicked.connect(win.owner.toggle_play)
         self.next.clicked.connect(lambda: win.owner.step(+1))
-        for b in (self.prev, self.play, self.next):
+        self.shuf.clicked.connect(lambda: (win.owner.toggle_shuffle(), self.sync()))
+        self.rep.clicked.connect(self.cycle_repeat)
+        for b in (self.shuf, self.prev, self.play, self.next, self.rep):
             btns.addWidget(b)
         btns.addStretch(1)
         mid.addLayout(btns)
@@ -1755,6 +1801,19 @@ class PlayerBar(QWidget):
         lay.addWidget(self.vol)
         self._art_key = None
 
+    REPEAT_TIPS = {"off": "Повтор выключен — список доиграет и остановится",
+                   "all": "Повтор списка — после последнего трека снова первый",
+                   "one": "Повтор трека — этот трек по кругу"}
+
+    def cycle_repeat(self):
+        """выключен → весь список → один трек → выключен."""
+        o = self.win.owner
+        cur = getattr(o, "repeat", "all")
+        nxt = {"off": "all", "all": "one", "one": "off"}.get(cur if isinstance(cur, str) else "all", "all")
+        o.set_repeat(nxt)
+        self.win.toast({"all": "🔁 ПОВТОР СПИСКА", "one": "🔂 ПОВТОР ТРЕКА", "off": "ПОВТОР ВЫКЛЮЧЕН"}[nxt])
+        self.sync()
+
     def _seek(self):
         self._dragging = False
         d = self.win.owner.player.duration()
@@ -1769,6 +1828,15 @@ class PlayerBar(QWidget):
                                                                       Qt.TextElideMode.ElideRight, 215))
         self.play.playing = o.is_playing()
         self.play.update()
+        rep = getattr(o, "repeat", "all")
+        rep = rep if rep in ("off", "all", "one") else "all"
+        shuf = "on" if getattr(o, "shuffle", False) is True else "off"
+        if rep != self.rep.mode or shuf != self.shuf.mode:
+            self.rep.mode, self.shuf.mode = rep, shuf
+            self.rep.setToolTip(self.REPEAT_TIPS[rep] + "\nклик — сменить")
+            self.shuf.setToolTip("Перемешать: " + ("включено" if shuf == "on" else "выключено"))
+            self.rep.update()
+            self.shuf.update()
         self.sync_pos()
         if not self.vol.isSliderDown():
             self.vol.blockSignals(True)

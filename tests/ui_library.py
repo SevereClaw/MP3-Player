@@ -207,6 +207,15 @@ for k in range(0, len(b), 20000):
     print("SHOTPART", "lib_transition.jpg", k // 20000, b[k:k + 20000], flush=True)
 w.open_album(next(a for a in w.albums if a["title"].startswith("Persona"))); dump("lib_album.jpg")
 w.go("now"); dump("lib_now.jpg")
+_rep = []                                                 # кнопка повтора: список → трек → выкл
+owner.set_repeat = lambda m: (_rep.append(m), setattr(owner, "repeat", m))
+for _ in range(3):
+    w.bar.rep.click()
+print("повтор:", _rep)
+assert _rep == ["one", "off", "all"], _rep
+owner.repeat, owner.shuffle = "one", True
+w.bar.sync(); dump("lib_bar_repeat.jpg")
+owner.repeat, owner.shuffle = "all", False
 from PySide6.QtGui import QWheelEvent                     # колёсико на «Сейчас играет» — шкала громкости
 from PySide6.QtCore import QPoint
 _vol = []
