@@ -304,4 +304,44 @@ w.search.setText("кино"); dump("lib_search.jpg")
 w.search.clear()
 w.go("settings"); dump("lib_settings.jpg")
 w.settings.scroll.verticalScrollBar().setValue(700); dump("lib_settings2.jpg")
+# ---- Яндекс и Spotify
+owner.ystream = types.SimpleNamespace(cache_dir=os.path.join(tmp, "yandex"), play=lambda *a, **k: None,
+                                      play_wave=lambda: None)
+w.go("yandex"); __import__("time").sleep(0.6); dump("lib_yandex_login.jpg")
+owner.cfg["ym_token"] = "x"
+w.yandex.account = {"name": "Миша", "login": "misha"}
+w.yandex._sync_login()
+_yt = [{"id": str(i), "title": t, "artist": a, "album": al, "duration": d, "available": i != 4}
+       for i, (t, a, al, d) in enumerate([("Группа крови", "Кино", "Группа крови", 286), ("Звезда по имени Солнце", "Кино", "Звезда по имени Солнце", 225),
+                                          ("unravel", "TK from 凛として時雨", "Unravel", 238), ("Kick Back", "Kenshi Yonezu", "Kick Back", 194),
+                                          ("Idol", "YOASOBI", "Idol", 213), ("Прованс", "Ёлка", "Прованс", 212)])]
+w.yandex.show_tracks("Мне нравится", _yt, "liked")
+print("на диске:", [t["title"] for t in _yt if t.get("path")])
+assert sum(1 for t in _yt if t.get("path")) == 3
+__import__("time").sleep(0.6); dump("lib_yandex.jpg")
+# пульт: играет Spotify, у нас тишина
+import external
+ext = external.Watcher(owner)
+ext.timer.stop(); ext.stat_timer.stop()
+owner.ext = ext
+_ip = FakeOwner.is_playing
+FakeOwner.is_playing = lambda self: False
+_im2 = QImage(400, 400, QImage.Format.Format_RGB32); _im2.fill(QColor(30, 185, 84))
+ext.state = {"kind": "spotify", "app": "Spotify", "aumid": "Spotify.exe", "title": "Kick Back", "artist": "Kenshi Yonezu",
+             "album": "Kick Back", "playing": True, "pos": 48.0, "length": 194.0, "key": "spotify|Kenshi Yonezu|Kick Back", "thumb": None}
+ext._base = (48.0, __import__("time").monotonic()); ext._ext_t = __import__("time").monotonic()
+ext.cover = _im2
+ext.lyrics = Lyrics([40000, 47000, 52000, 58000], ["Hikari no hou e", "Kick back!", "努力 未来 a beautiful star", "Lucky lucky"])
+assert w.owner is ext.proxy and w.external()
+_cmds = []
+ext.command = lambda c, a=None: _cmds.append(c)
+w.bar.play.click(); w.bar.next.click()
+print("пульт:", _cmds)
+assert _cmds == ["toggle", "next"], _cmds
+w.go("now")
+for _ in range(20):
+    __import__("time").sleep(0.03); w.now.repaint()
+dump("lib_now_spotify.jpg")
+FakeOwner.is_playing = _ip
+assert w.owner is owner
 print("альбомов:", len(w.albums), "исполнителей:", len(w.artists))

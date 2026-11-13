@@ -617,6 +617,8 @@ class StatsPage(QWidget):
                     continue
                 t = tracks.get(path) or {}
                 artist = self._artist_of(path, t) if not path.startswith("radio:") else (t.get("artist") or "радио")
+                if path.startswith("ext:"):                 # слушал в Spotify / Яндекс Музыке
+                    artist += " · " + ("Spotify" if path.startswith("ext:spotify") else "Яндекс Музыка")
                 row = {"kind": "track", "title": self._title_of(path, t), "sec": sc,
                        "sub": f"{artist} · {human_time(sc) if by_plays else plays_word(pl)}",
                        "cover_path": None if path.startswith("radio:") else path,

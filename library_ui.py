@@ -224,7 +224,7 @@ class CoverCache(QObject):
 
     def custom(self, path):
         """Своя картинка трека (поставил пользователь) или None."""
-        if not path or path.startswith("artist:"):
+        if not path or path.startswith(("artist:", "ext:")):
             return None
         if path not in self._custom:
             img = None
@@ -271,6 +271,8 @@ class CoverCache(QObject):
 
     def get(self, path):
         """QImage или None; если ещё не загружена — поставить в очередь (придёт сигнал ready)."""
+        if path and path.startswith("ext:"):              # трек Spotify / Яндекса — обложку даёт пульт
+            return None
         if path in self.mem:
             return self.mem[path]
         with self.lock:
@@ -1448,7 +1450,7 @@ class NowPlaying(QWidget):
     def contextMenuEvent(self, e):
         o = self.win.owner
         path = getattr(o, "loaded_path", None)
-        if not isinstance(path, str) or not path or getattr(o, "radio", False):
+        if not isinstance(path, str) or not path or getattr(o, "radio", False) or getattr(o, "external", False) is True:
             return
         from PySide6.QtGui import QGuiApplication
         clip = QGuiApplication.clipboard()
@@ -2202,7 +2204,7 @@ class PlayerBar(QWidget):
         self.shuf = IconButton("shuffle", 34)
         self.rep = IconButton("repeat", 34)
         self.prev.clicked.connect(lambda: win.owner.step(-1))
-        self.play.clicked.connect(win.owner.toggle_play)
+        self.play.clicked.connect(lambda: win.owner.toggle_play())
         self.next.clicked.connect(lambda: win.owner.step(+1))
         self.shuf.clicked.connect(lambda: (win.owner.toggle_shuffle(), self.sync()))
         self.rep.clicked.connect(self.cycle_repeat)
@@ -2650,6 +2652,20 @@ class SettingsPage(QWidget):
                                 ("ЧТО НОВОГО", lambda: o.show_whats_new(max(0, o.build - 5), manual=True))],
                      label_get=lambda: f"Сборка {o.build}" if o.build else "Запущено из исходников")
 
+        self.section("SPOTIFY И ЯНДЕКС МУЗЫКА")
+        self.toggle("Пульт для Spotify и Яндекс Музыки", lambda: cfg("ext_remote", True),
+                    lambda: self.flip("ext_remote", True),
+                    "Играют они — медиатека показывает их трек, обложку и текст, а кнопки управляют ими")
+        self.toggle("Играет что-то одно", lambda: cfg("ext_exclusive", True), lambda: self.flip("ext_exclusive", True),
+                    "Включил Spotify — наш плеер встаёт на паузу, и наоборот")
+        self.toggle("Считать их в «Итогах»", lambda: cfg("ext_stats", True), lambda: self.flip("ext_stats", True),
+                    "Что слушал в Spotify и Яндекс Музыке — тоже в статистике")
+        self.toggle("Скачанное из Яндекса — в медиатеку", lambda: cfg("ym_in_library", True),
+                    lambda: self.flip("ym_in_library", True, after=lambda: o.scan_library(force=True)),
+                    "Треки, что играли из Яндекс Музыки, остаются на диске и видны в альбомах")
+        self.actions("Аккаунт Яндекс Музыки", [("ОТКРЫТЬ", lambda: self.win.go("yandex"))],
+                     label_get=lambda: "Яндекс Музыка: " + ("вход выполнен" if cfg("ym_token") else "не вошёл"))
+
         self.section("ИТОГИ И ПРОЧЕЕ")
         self.actions("Статистика прослушиваний", [("📊 ИТОГИ НЕДЕЛИ", o.open_weekly),
                                                   ("СБРОСИТЬ…", o.reset_stats)])
@@ -2923,7 +2939,7 @@ class LibraryWindow(QWidget):
     def __init__(self, owner, cache_dir):
         super().__init__(None, Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
         self.setMouseTracking(True)
-        self.owner = owner
+        self.real_owner = owner               # плеер; self.owner — он же или пульт Spotify / Яндекса
         self.lib = owner.library
         self.setWindowTitle("Медиатека — MP3 Плеер")
         self.resize(1280, 800)
@@ -2980,7 +2996,7 @@ class LibraryWindow(QWidget):
         self.nav = {}
         for key, text in (("home", "ГЛАВНАЯ"), ("albums", "АЛЬБОМЫ"), ("artists", "ИСПОЛНИТЕЛИ"),
                           ("tracks", "ВСЕ ТРЕКИ"), ("now", "СЕЙЧАС ИГРАЕТ"), ("stats", "ИТОГИ"),
-                          ("settings", "НАСТРОЙКИ")):
+                          ("yandex", "ЯНДЕКС · SPOTIFY"), ("settings", "НАСТРОЙКИ")):
             b = NavButton(text)
             b.setFixedHeight(42)
             b.clicked.connect(lambda _=False, k=key: self.go(k))
@@ -3069,9 +3085,12 @@ class LibraryWindow(QWidget):
         import library_stats
         self.stats_page = library_stats.StatsPage(self)
         self.dups = library_stats.DuplicatesPage(self)
+        import library_stream
+        self.yandex = library_stream.YandexPage(self)
         for key, w, title in (("home", self.home, None), ("albums", self.albums_view, "АЛЬБОМЫ"), ("artists", self.artists_view, "ИСПОЛНИТЕЛИ"),
                               ("tracks", self.tracks_box, "ВСЕ ТРЕКИ"), ("detail", self.detail, None),
                               ("now", self.now, None), ("stats", self.stats_page, None), ("dups", self.dups, None),
+                              ("yandex", self.yandex, None),
                               ("settings", self.settings, None)):
             page = w
             if title:
@@ -3109,6 +3128,7 @@ class LibraryWindow(QWidget):
         self._toast.hide()
         self._toast_timer = QTimer(self, singleShot=True, interval=1800)
         self._toast_timer.timeout.connect(self._toast.hide)
+        self._built = True
         self.restyle()
         self.sync_playlists()
         self.go("home")
@@ -3558,10 +3578,24 @@ class LibraryWindow(QWidget):
         img.save(f, "JPG", 90)
         return img
 
+    @property
+    def owner(self):
+        """Плеер — или, пока у нас тихо, а играют Spotify / Яндекс Музыка, их «пульт»."""
+        ro = self.real_owner
+        ext = ro.__dict__.get("ext") if hasattr(ro, "__dict__") else None
+        if ext is not None and self.__dict__.get("_built") and ext.active():
+            return ext.proxy
+        return ro
+
+    def external(self):
+        return getattr(self.owner, "external", False) is True
+
     def now_artist(self):
         """Исполнитель текущего трека; в тегах пусто — тот, что нашёлся в интернете."""
         o = self.owner
         a = getattr(o, "artist", "") or ""
+        if getattr(o, "external", False) is True:
+            return f"{a} · {o.app}" if a else o.app
         if a:
             return a
         path = getattr(o, "loaded_path", None)

@@ -17,6 +17,11 @@ jobs:
         env:
           PYTHONIOENCODING: utf-8
         run: python tests/test_online_art.py
+      - name: Spotify / Yandex (live)
+        continue-on-error: true
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python tests/test_streaming_live.py
       - name: Screenshots
         env:
           PYTHONIOENCODING: utf-8

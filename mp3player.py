@@ -813,6 +813,11 @@ class Mp3Widget(QWidget):
         # поиск по всей музыке и правка тегов
         self.library = libmod.Library(os.path.join(self.data_dir, "library.json"))
         self.lib_sig = LibrarySignals()
+        # Spotify и Яндекс Музыка: пульт, «Итоги» и прослушивание Яндекса у нас
+        import external
+        import ystream
+        self.ext = external.Watcher(self)
+        self.ystream = ystream.Streamer(self)
         self.lib_sig.scanned.connect(self.on_library_scanned)
         self.search_panel = SearchPanel(self.library)
         self.search_panel.play_path.connect(self.play_found)
@@ -2239,6 +2244,9 @@ class Mp3Widget(QWidget):
         dd = self.doulander_dir(ask=False)
         if dd and os.path.isdir(dd):
             out.append(dd)
+        yd = os.path.join(self.data_dir, "yandex")          # скачанное из Яндекс Музыки
+        if self.cfg.get("ym_in_library", True) and os.path.isdir(yd):
+            out.append(yd)
         # без вложенных дублей: C:\Music\Rock не нужен, если есть C:\Music
         out = sorted({pkey(f): npath(f) for f in out}.values(), key=len)
         roots = []
