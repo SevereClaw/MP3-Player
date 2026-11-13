@@ -385,7 +385,7 @@ class TileDelegate(QStyledItemDelegate):
     def paint(self, p, opt, index):
         r = index.data(Qt.ItemDataRole.UserRole)
         rect = QRectF(opt.rect).adjusted(10, 10, -10, -6)
-        hover = bool(opt.state & QStyle.StateFlag.State_MouseOver)
+        hover = bool(opt.state & QStyle.StateFlag.State_MouseOver) or bool(opt.state & QStyle.StateFlag.State_HasFocus)
         sel = bool(opt.state & QStyle.StateFlag.State_Selected)
         p.save()
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -468,6 +468,23 @@ class _HoverSfx:
 
 
 class TileView(QListView, _HoverSfx):
+    def keyPressEvent(self, e):
+        k = e.key()
+        ix = self.currentIndex()
+        if k in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and ix.isValid():
+            sfx("select")
+            self.clicked.emit(ix)
+            return
+        if k == Qt.Key.Key_Left and ix.isValid() and self.visualRect(ix).left() < 30 and hasattr(self, "win_"):
+            self.win_.focus_sidebar()
+            return
+        super().keyPressEvent(e)
+
+    def currentChanged(self, cur, prev):
+        super().currentChanged(cur, prev)
+        if self.hasFocus() and cur.isValid():
+            sfx("hover")
+
     def mouseMoveEvent(self, e):
         self._hover_sfx(e)
         super().mouseMoveEvent(e)
@@ -492,6 +509,7 @@ class TileView(QListView, _HoverSfx):
         self.setModel(self.model_)
         self.tiles = TileDelegate(win, round_art)
         self.setItemDelegate(self.tiles)
+        self.win_ = win
 
     def resizeEvent(self, e):
         # плитки растягиваются, чтобы ряд занимал всю ширину (без пустого края справа)
@@ -505,13 +523,37 @@ class TileView(QListView, _HoverSfx):
 
 
 # ---------------------------------------------------------------- список треков
+def track_columns(rect, show_album=True, stats=False):
+    """Колонки строки трека — общие для строк и для заголовка с сортировкой."""
+    bar = QRectF(rect).adjusted(52, 4, -8, -4)
+    R = bar.right()
+    c = {"num": QRectF(rect.left(), rect.top(), 44, rect.height()),
+         "dur": QRectF(R - 70, rect.top(), 56, rect.height())}
+    right = R - 70
+    if stats:
+        c["added"] = QRectF(right - 96, rect.top(), 86, rect.height())
+        c["plays"] = QRectF(right - 96 - 70, rect.top(), 60, rect.height())
+        right -= 166
+    c["fav"] = QRectF(right - 22, rect.top(), 20, rect.height())
+    x = bar.left() + 22
+    w = right - 26 - x
+    ct = w * (0.46 if show_album else 0.6)
+    ca = w * (0.27 if show_album else 0.4)
+    c["title"] = QRectF(x, rect.top(), ct - 12, rect.height())
+    c["artist"] = QRectF(x + ct, rect.top(), ca - 12, rect.height())
+    if show_album:
+        c["album"] = QRectF(x + ct + ca, rect.top(), w - ct - ca - 8, rect.height())
+    return bar, c
+
+
 class TrackDelegate(QStyledItemDelegate):
     H = 46
 
-    def __init__(self, win, show_album=True):
+    def __init__(self, win, show_album=True, stats=False):
         super().__init__()
         self.win = win
         self.show_album = show_album
+        self.stats = stats
 
     def sizeHint(self, option, index):
         return QSize(400, self.H)
@@ -520,10 +562,20 @@ class TrackDelegate(QStyledItemDelegate):
         r = index.data(Qt.ItemDataRole.UserRole)
         rect = QRectF(opt.rect)
         hover = bool(opt.state & QStyle.StateFlag.State_MouseOver)
+        focus = bool(opt.state & QStyle.StateFlag.State_HasFocus)
+        selected = bool(opt.state & QStyle.StateFlag.State_Selected)
         cur = self.win.is_current(r["path"])
         p.save()
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        bar = rect.adjusted(52, 4, -8, -4)
+        bar, col = track_columns(rect, self.show_album, self.stats)
+        if selected and not cur:                             # выделено (Shift / Ctrl) — голубая плашка с меткой
+            c = QColor(CYAN)
+            c.setAlpha(75)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(c)
+            p.drawPolygon(skew_poly(bar, 12))
+            p.setBrush(CYAN)
+            p.drawPolygon(skew_poly(QRectF(bar.left() - 2, bar.top(), 8, bar.height()), 4))
         if cur:                                               # играет — белая→голубая скошенная плашка
             g = QLinearGradient(bar.topLeft(), bar.topRight())
             g.setColorAt(0, WHITE)
@@ -532,49 +584,46 @@ class TrackDelegate(QStyledItemDelegate):
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(g)
             p.drawPolygon(skew_poly(bar, 12))
-        elif hover:
+        elif hover and not selected:
             c = QColor(CYAN)
             c.setAlpha(40)
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(c)
             p.drawPolygon(skew_poly(bar, 12))
-        else:
+        elif not selected:
             p.setPen(QPen(QColor(255, 255, 255, 18), 1))
             p.drawLine(QPointF(bar.left() + 10, rect.bottom()), QPointF(rect.right() - 8, rect.bottom()))
+        if focus:                                            # курсор клавиатуры — рамка, как в меню
+            p.setPen(QPen(WHITE if not cur else NAVY, 1.5, Qt.PenStyle.DashLine))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawPolygon(skew_poly(bar.adjusted(1, 1, -1, -1), 12))
         # номер
         p.setFont(pfont(18))
         p.setPen(CYAN)
         num = "▶" if cur and self.win.owner_playing() else str(r.get("num", index.row() + 1))
-        p.drawText(QRectF(rect.left(), rect.top(), 44, rect.height()),
-                   Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, num)
+        p.drawText(col["num"], Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, num)
         ink = NAVY if cur else WHITE
         dim = QColor(30, 60, 110) if cur else DIM
-        x = bar.left() + 22
-        w = bar.width() - 22 - 70
-        col_t = w * (0.5 if self.show_album else 0.6)
-        col_a = w * (0.25 if self.show_album else 0.4)
-        p.setFont(pfont(15, weight=QFont.Weight.Bold))
-        fm = QFontMetrics(p.font())
-        p.setPen(ink)
-        p.drawText(QRectF(x, rect.top(), col_t - 12, rect.height()), Qt.AlignmentFlag.AlignVCenter,
-                   fm.elidedText(r["title"], Qt.TextElideMode.ElideRight, int(col_t - 12)))
-        p.setFont(pfont(13, bold=False))
-        fm = QFontMetrics(p.font())
-        p.setPen(dim)
-        p.drawText(QRectF(x + col_t, rect.top(), col_a - 12, rect.height()), Qt.AlignmentFlag.AlignVCenter,
-                   fm.elidedText(r["artist"], Qt.TextElideMode.ElideRight, int(col_a - 12)))
-        if self.show_album:
-            p.drawText(QRectF(x + col_t + col_a, rect.top(), w - col_t - col_a - 8, rect.height()),
-                       Qt.AlignmentFlag.AlignVCenter,
-                       fm.elidedText(r["album"], Qt.TextElideMode.ElideRight, int(w - col_t - col_a - 8)))
+
+        def text(key, s, f, pen, align=Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft):
+            if key not in col:
+                return
+            p.setFont(f)
+            p.setPen(pen)
+            fm = QFontMetrics(f)
+            p.drawText(col[key], align, fm.elidedText(s or "", Qt.TextElideMode.ElideRight, int(col[key].width())))
+        text("title", r["title"], pfont(15, weight=QFont.Weight.Bold), ink)
+        text("artist", r["artist"], pfont(13, bold=False), dim)
+        text("album", r["album"], pfont(13, bold=False), dim)
+        if self.stats:
+            right = Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight
+            text("plays", str(r.get("plays") or "—"), pfont(13, weight=QFont.Weight.Bold), dim, right)
+            text("added", r.get("added_s", ""), pfont(12, bold=False), dim, right)
         if self.win.owner.is_fav(r["path"]):
-            p.setPen(QColor("#ff5f8a") if not cur else QColor("#d0245a"))
-            p.drawText(QRectF(bar.right() - 92, rect.top(), 20, rect.height()), Qt.AlignmentFlag.AlignVCenter, "♥")
-        p.setFont(pfont(14, weight=QFont.Weight.Bold))
-        p.setPen(ink if cur else DIM)
+            text("fav", "♥", pfont(13, bold=False), QColor("#ff5f8a") if not cur else QColor("#d0245a"))
         d = r.get("d") or 0
-        p.drawText(QRectF(bar.right() - 70, rect.top(), 56, rect.height()),
-                   Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, fmt_ms(d * 1000) if d else "")
+        text("dur", fmt_ms(d * 1000) if d else "", pfont(14, weight=QFont.Weight.Bold), ink if cur else DIM,
+             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
         p.restore()
 
 
@@ -587,8 +636,30 @@ class TrackView(QListView, _HoverSfx):
         sfx("select")
         super().mouseDoubleClickEvent(e)
 
+    def keyPressEvent(self, e):
+        k = e.key()
+        ix = self.currentIndex()
+        if k in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and ix.isValid():
+            sfx("select")
+            self.doubleClicked.emit(ix)                   # Enter — как двойной клик: играть
+            return
+        if k == Qt.Key.Key_Delete and self.delete_cb and self.selected_paths():
+            self.delete_cb(self.selected_paths())
+            return
+        if k == Qt.Key.Key_Left and self.win_ is not None:
+            self.win_.focus_sidebar()
+            return
+        super().keyPressEvent(e)
+
+    def currentChanged(self, cur, prev):
+        super().currentChanged(cur, prev)
+        if self.hasFocus() and cur.isValid():
+            sfx("hover")
+
     def __init__(self, win, show_album=True):
         super().__init__()
+        self.win_ = win
+        self.delete_cb = None          # fn(paths) — Delete (плейлист, очередь)
         self.setMouseTracking(True)
         self.setUniformItemSizes(True)
         self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
@@ -644,6 +715,84 @@ class TrackView(QListView, _HoverSfx):
         else:
             e.ignore()
 
+
+
+# ---------------------------------------------------------------- заголовок колонок с сортировкой
+class SortHeader(QWidget):
+    changed = Signal(str, bool)           # ключ, по убыванию
+
+    LABELS = (("num", "#"), ("title", "НАЗВАНИЕ"), ("artist", "ИСПОЛНИТЕЛЬ"), ("album", "АЛЬБОМ"),
+              ("plays", "ПРОСЛ."), ("added", "ДОБАВЛЕН"), ("dur", "ВРЕМЯ"))
+
+    def __init__(self, view):
+        super().__init__()
+        self.view = view
+        self.setFixedHeight(30)
+        self.setMouseTracking(True)
+        self.key, self.desc = "num", False
+        self.hover = None
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def _cols(self):
+        vp = self.view.viewport()
+        top = self.window()
+        off = vp.mapTo(top, QPoint(0, 0)).x() - self.mapTo(top, QPoint(0, 0)).x()
+        _bar, c = track_columns(QRectF(off, 0, vp.width(), self.height()), True, True)
+        return c
+
+    def _at(self, x):
+        for k, r in self._cols().items():
+            if k != "fav" and r.left() - 6 <= x <= r.right() + 6:
+                return k
+        return None
+
+    def mouseMoveEvent(self, e):
+        h = self._at(e.position().x())
+        if h != self.hover:
+            self.hover = h
+            if h:
+                sfx("hover")
+            self.update()
+
+    def leaveEvent(self, _e):
+        self.hover = None
+        self.update()
+
+    def mousePressEvent(self, e):
+        k = self._at(e.position().x())
+        if not k:
+            return
+        sfx("select")
+        if k == self.key and k != "num":
+            self.desc = not self.desc
+        else:
+            self.key = k
+            self.desc = k in ("plays", "added", "dur")         # числа — сначала большие
+        self.changed.emit(self.key, self.desc)
+        self.update()
+
+    def set_state(self, key, desc):
+        self.key, self.desc = key, desc
+        self.update()
+
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        cols = self._cols()
+        for k, label in self.LABELS:
+            r = cols.get(k)
+            if r is None:
+                continue
+            on = k == self.key
+            p.setFont(pfont(12))
+            p.setPen(CYAN if on else (WHITE if self.hover == k else DIM))
+            txt = label + ((" ▼" if self.desc else " ▲") if on and k != "num" else "")
+            align = Qt.AlignmentFlag.AlignVCenter | (Qt.AlignmentFlag.AlignRight if k in ("num", "plays", "added", "dur")
+                                                    else Qt.AlignmentFlag.AlignLeft)
+            p.drawText(r, align, txt)
+        p.setPen(QPen(CYAN_D, 1))
+        p.drawLine(QPointF(0, self.height() - 1), QPointF(self.width(), self.height() - 1))
+        p.end()
 
 # ---------------------------------------------------------------- шапка альбома / исполнителя
 class Header(QWidget):
@@ -778,6 +927,8 @@ class DetailPage(QWidget):
         for b in self.pl_btns:
             b.setVisible(pid is not None)
         self.tracks.reorder = self._reorder if pid else None
+        self.tracks.delete_cb = (lambda paths: (self.win.playlists.remove(self.pid, paths),
+                                                self.win.playlists_changed())) if pid else None
         self.tracks.external_drop = self._drop if pid else None
 
     def _reorder(self, src, dst):
@@ -1222,6 +1373,31 @@ class _Clicky:
 
 
 class NavButton(QPushButton, _Clicky):
+    def focusInEvent(self, e):
+        self._hover = True
+        sfx("hover")
+        self.update()
+        super().focusInEvent(e)
+
+    def focusOutEvent(self, e):
+        self._hover = False
+        self.update()
+        super().focusOutEvent(e)
+
+    def keyPressEvent(self, e):
+        k = e.key()
+        w = self.nav_win
+        if w is not None and k in (Qt.Key.Key_Up, Qt.Key.Key_Down):
+            w.focus_nav_step(self, -1 if k == Qt.Key.Key_Up else 1)
+            return
+        if k in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Right, Qt.Key.Key_Space):
+            self._sfx_click()
+            self.click()
+            if w is not None and k != Qt.Key.Key_Space:
+                QTimer.singleShot(0, w.focus_content)
+            return
+        super().keyPressEvent(e)
+
     def __init__(self, text, small=False):
         super().__init__(text)
         self.pressed.connect(self._sfx_click)
@@ -1229,6 +1405,8 @@ class NavButton(QPushButton, _Clicky):
         self.setCheckable(not small)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus if not small else Qt.FocusPolicy.TabFocus)
+        self.nav_win = None             # окно — для стрелок между пунктами
         self.setFixedHeight(34 if small else 46)
         if small:
             self.setFixedWidth(130)
@@ -1997,7 +2175,30 @@ class LibraryWindow(QWidget):
         self.artists_view = TileView(self, round_art=True)
         self.artists_view.clicked.connect(lambda ix: self.open_artist(ix.data(Qt.ItemDataRole.UserRole)))
         self.tracks_view = TrackView(self)
+        self.tracks_view.setItemDelegate(TrackDelegate(self, show_album=True, stats=True))
         self.tracks_paths = []
+        self.tracks_box = QWidget()
+        tb = QVBoxLayout(self.tracks_box)
+        tb.setContentsMargins(0, 0, 0, 0)
+        tb.setSpacing(4)
+        fl = QHBoxLayout()
+        fl.setSpacing(4)
+        self.filter_chips = {}
+        for key, name in (("all", "ВСЕ"), ("fav", "♥ ЛЮБИМЫЕ"), ("new", "НЕ СЛУШАЛ"), ("top", "ЧАСТО СЛУШАЮ"),
+                          ("month", "ДОБАВЛЕНО ЗА МЕСЯЦ")):
+            c = P3Chip(name)
+            c.clicked.connect(lambda _=False, k=key: self.set_filter(k))
+            fl.addWidget(c)
+            self.filter_chips[key] = c
+        fl.addStretch(1)
+        tb.addLayout(fl)
+        self.sort_head = SortHeader(self.tracks_view)
+        self.sort_head.changed.connect(self.set_sort)
+        tb.addWidget(self.sort_head)
+        tb.addWidget(self.tracks_view, 1)
+        self.tracks_count = QLabel("")
+        self.tracks_count.setObjectName("count")
+        tb.addWidget(self.tracks_count)
         self.tracks_view.doubleClicked.connect(
             lambda ix: self.play_paths(self.tracks_paths, self.tracks_paths[ix.row()]))
         self.tracks_view.customContextMenuRequested.connect(
@@ -2007,7 +2208,7 @@ class LibraryWindow(QWidget):
         self.settings = SettingsPage(self)
         self.home = self.more.HomePage(self)
         for key, w, title in (("home", self.home, None), ("albums", self.albums_view, "АЛЬБОМЫ"), ("artists", self.artists_view, "ИСПОЛНИТЕЛИ"),
-                              ("tracks", self.tracks_view, "ВСЕ ТРЕКИ"), ("detail", self.detail, None),
+                              ("tracks", self.tracks_box, "ВСЕ ТРЕКИ"), ("detail", self.detail, None),
                               ("now", self.now, None), ("settings", self.settings, None)):
             page = w
             if title:
@@ -2047,6 +2248,15 @@ class LibraryWindow(QWidget):
         self.restyle()
         self.sync_playlists()
         self.go("home")
+        # клавиатура: стрелки по меню, Enter — выбрать, Ctrl+1…6 — разделы, Alt+← — назад
+        for b in self.nav.values():
+            b.nav_win = self
+        from PySide6.QtGui import QShortcut, QKeySequence
+        for i, key in enumerate(("home", "albums", "artists", "tracks", "now", "settings"), 1):
+            QShortcut(QKeySequence(f"Ctrl+{i}"), self, activated=lambda k=key: (sfx("select"), self.go(k)))
+        QShortcut(QKeySequence("Alt+Left"), self, activated=self.go_back)
+        QShortcut(QKeySequence("Ctrl+L"), self, activated=lambda: self.toggle_queue())
+        self.setAcceptDrops(True)
 
     # ------------------------------------------------------------ стиль
     def restyle(self):
@@ -2117,15 +2327,37 @@ class LibraryWindow(QWidget):
         self.count.setText(f"{len(items)} трек. · {len(self.albums)} альб. · {len(self.artists)} исп.\n"
                            f"{fmt_total(total)} музыки")
 
+    def _stat_tracks(self):
+        st = getattr(self.owner, "stats", None)
+        return (st.data.get("tracks") or {}) if st is not None else {}
+
     def _rows_for(self, paths):
         rows = []
+        stats = self._stat_tracks()
         for i, pth in enumerate(paths):
             it = self.items.get(pth, {})
             t, a, alb = libmod.track_view(pth, it)
-            rows.append({"path": pth, "title": t, "artist": a, "album": alb, "d": it.get("d"), "num": i + 1})
+            m = it.get("m") or 0
+            rows.append({"path": pth, "title": t, "artist": a, "album": alb, "d": it.get("d"), "num": i + 1,
+                         "plays": int((stats.get(pth) or {}).get("plays") or 0), "added": m,
+                         "added_s": time.strftime("%d.%m.%y", time.localtime(m)) if m else ""})
         return rows
 
+    def set_sort(self, key, desc):
+        self.owner.cfg["tracks_sort"] = [key, desc]
+        self._fill_tracks(self.search.text())
+
+    def set_filter(self, key):
+        self.owner.cfg["tracks_filter"] = key
+        self._fill_tracks(self.search.text())
+
     def _fill_tracks(self, q):
+        cfg = getattr(self.owner, "cfg", {})
+        key, desc = (cfg.get("tracks_sort") or ["num", False])[:2]
+        flt = cfg.get("tracks_filter", "all")
+        for k, c in self.filter_chips.items():
+            c.setChecked(k == flt)
+        self.sort_head.set_state(key, desc)
         if q.strip():
             paths = self.lib.search(q, limit=2000)
             self.tracks_title.setText(f"ПОИСК: «{q.strip()}»")
@@ -2133,8 +2365,27 @@ class LibraryWindow(QWidget):
             paths = sorted(self.items, key=lambda p: tuple(libmod.norm(x) for x in
                                                             libmod.track_view(p, self.items[p])[1::-1]))
             self.tracks_title.setText("ВСЕ ТРЕКИ")
-        self.tracks_paths = paths
-        self.tracks_view.model_.set_rows(self._rows_for(paths))
+        rows = self._rows_for(paths)
+        month_ago = time.time() - 30 * 86400
+        if flt == "fav":
+            rows = [r for r in rows if self.owner.is_fav(r["path"])]
+        elif flt == "new":
+            rows = [r for r in rows if not r["plays"]]
+        elif flt == "top":
+            rows = [r for r in rows if r["plays"] >= 5]
+        elif flt == "month":
+            rows = [r for r in rows if r["added"] >= month_ago]
+        if key != "num":
+            sk = {"title": lambda r: libmod.norm(r["title"]), "artist": lambda r: (libmod.norm(r["artist"]), libmod.norm(r["album"])),
+                  "album": lambda r: (libmod.norm(r["album"]), libmod.norm(r["title"])), "plays": lambda r: r["plays"],
+                  "added": lambda r: r["added"], "dur": lambda r: r.get("d") or 0}[key]
+            rows.sort(key=sk, reverse=bool(desc))
+        for i, r in enumerate(rows):
+            r["num"] = i + 1
+        self.tracks_paths = [r["path"] for r in rows]
+        self.tracks_view.model_.set_rows(rows)
+        total = sum((r.get("d") or 0) for r in rows)
+        self.tracks_count.setText(f"{len(rows)} трек. · {fmt_total(total)}")
 
     def _search_changed(self, q):
         self._fill_tracks(q)
@@ -2170,6 +2421,129 @@ class LibraryWindow(QWidget):
         self.timer.setInterval(16 if key in ("now", "home") else 250)      # волны и «Сейчас играет» — 60 кадров
         if hasattr(self, "pl_btns"):
             self._mark_playlist()
+
+    # ------------------------------------------------------------ клавиатура
+    def _nav_list(self):
+        return list(self.nav.values()) + list(self.pl_btns.values())
+
+    def focus_sidebar(self):
+        sfx("back")
+        lst = self._nav_list()
+        target = next((b for b in lst if b.isChecked()), lst[0] if lst else None)
+        if target:
+            target.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def focus_nav_step(self, btn, d):
+        lst = self._nav_list()
+        if btn in lst:
+            i = (lst.index(btn) + d) % len(lst)
+            lst[i].setFocus(Qt.FocusReason.OtherFocusReason)
+            lst[i].nav_win = self
+
+    def focus_content(self):
+        w = self.stack.currentWidget()
+        view = {self.pages["albums"]: self.albums_view, self.pages["artists"]: self.artists_view,
+                self.pages["tracks"]: self.tracks_view, self.pages["detail"]: self.detail.tracks}.get(w)
+        if w is self.home:
+            view = next((st for _l, st, _k in self.home.sections.values() if st.isVisible()), None)
+        if view is None:
+            w.setFocus()
+            return
+        view.setFocus(Qt.FocusReason.OtherFocusReason)
+        if not view.currentIndex().isValid() and view.model().rowCount() > 0:
+            view.setCurrentIndex(view.model().index(0, 0))
+
+    # ------------------------------------------------------------ перетаскивание из Проводника
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasUrls() and any(u.isLocalFile() for u in e.mimeData().urls()):
+            e.acceptProposedAction()
+
+    def dropEvent(self, e):
+        urls = [u.toLocalFile() for u in e.mimeData().urls() if u.isLocalFile()]
+        dirs = [os.path.normpath(u) for u in urls if os.path.isdir(u)]
+        if dirs:                                   # папку — в медиатеку
+            folders = self.owner.cfg.setdefault("folders", [])
+            added = 0
+            for d in dirs:
+                if not any(os.path.normcase(f) == os.path.normcase(d) for f in folders):
+                    folders.append(d)
+                    added += 1
+            self.owner.save_later()
+            self.owner.scan_library(force=True)
+            self.toast(f"📁 ПАПКА В МЕДИАТЕКЕ: {os.path.basename(dirs[0])}" + (f" И ЕЩЁ {len(dirs) - 1}" if len(dirs) > 1 else ""))
+        files = [p for p in self.more.paths_from_mime(e.mimeData()) if not any(
+            os.path.normcase(p).startswith(os.path.normcase(d) + os.sep) for d in dirs)]
+        if files:                                  # файлы — играть сейчас
+            for p in files:
+                try:
+                    self.lib.update(p)             # сразу видны в поиске и «Всех треках»
+                except Exception:
+                    pass
+            self.play_paths(files, files[0])
+            self.toast(f"▶ {len(files)} ТРЕК." if len(files) > 1 else "▶ " + os.path.basename(files[0]))
+        e.acceptProposedAction()
+
+    # ------------------------------------------------------------ теги сразу у нескольких треков
+    def batch_tags(self, paths):
+        from PySide6.QtWidgets import QDialog, QDialogButtonBox, QFormLayout, QFileDialog
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Теги: {len(paths)} трек.")
+        dlg.setStyleSheet(self.styleSheet() + f"QDialog {{ background:{NAVY.name()}; }}")
+        lay = QVBoxLayout(dlg)
+        info = QLabel(f"Меняется только то, что заполнено. Названия треков останутся свои.\n{len(paths)} трек. выбрано")
+        info.setObjectName("shint")
+        lay.addWidget(info)
+        form = QFormLayout()
+        first = libmod.read_tags(paths[0])
+        same = lambda k: first.get(k, "") if all(libmod.read_tags(p).get(k, "") == first.get(k, "") for p in paths[1:6]) else ""
+        artist = QLineEdit(same("artist"))
+        album = QLineEdit(same("album"))
+        artist.setPlaceholderText("не менять")
+        album.setPlaceholderText("не менять")
+        form.addRow("Исполнитель", artist)
+        form.addRow("Альбом", album)
+        lay.addLayout(form)
+        cover = {"data": None}
+        cbtn = P3Action("🖼 ОБЛОЖКА ДЛЯ ВСЕХ…")
+        cbtn.setFixedWidth(240)
+
+        def pick():
+            fn, _ = QFileDialog.getOpenFileName(dlg, "Обложка", os.path.dirname(paths[0]),
+                                                "Картинки (*.jpg *.jpeg *.png *.webp *.bmp)")
+            if fn:
+                img = QImage(fn)
+                if not img.isNull():
+                    if max(img.width(), img.height()) > 800:
+                        img = img.scaled(800, 800, Qt.AspectRatioMode.KeepAspectRatio,
+                                         Qt.TransformationMode.SmoothTransformation)
+                    buf = QBuffer()
+                    buf.open(QIODevice.OpenModeFlag.WriteOnly)
+                    img.convertToFormat(QImage.Format.Format_RGB32).save(buf, "JPG", 90)
+                    cover["data"] = bytes(buf.data())
+                    cbtn.setText("🖼 ОБЛОЖКА ВЫБРАНА ✓")
+        cbtn.clicked.connect(pick)
+        lay.addWidget(cbtn)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        lay.addWidget(bb)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        na, nal = artist.text().strip(), album.text().strip()
+        if not (na or nal or cover["data"]):
+            return
+        done = 0
+        for p in paths:
+            if not libmod.can_write(p):
+                continue
+            t = libmod.read_tags(p)
+            d = {"title": t.get("title", ""), "artist": na or t.get("artist", ""), "album": nal or t.get("album", ""),
+                 "cover": cover["data"], "remove_cover": False}
+            if hasattr(self.owner, "save_tags"):
+                self.owner.save_tags(p, d)
+            done += 1
+        self.toast(f"✎ ТЕГИ: {done} ТРЕК.")
+        QTimer.singleShot(1500, lambda: self.rebuild(force=True))
 
     def _snap(self, page):
         """Снимок страницы вместе с фоном окна (страницы прозрачные — фон рисует окно)."""
@@ -2427,7 +2801,10 @@ class LibraryWindow(QWidget):
             m.addAction("✖  Убрать из плейлиста", lambda: (self.playlists.remove(playlist, group),
                                                            self.playlists_changed()))
         m.addSeparator()
-        m.addAction("✎  Теги…", lambda: self.owner.edit_tags(path))
+        if len(group) > 1:
+            m.addAction(f"✎  Теги выбранных ({len(group)})…", lambda: self.batch_tags(group))
+        else:
+            m.addAction("✎  Теги…", lambda: self.owner.edit_tags(path))
         al = next((a for a in self.albums if path in a["tracks"]), None)
         if al:
             m.addAction(f"💿  Альбом «{al['title']}»", lambda: self.open_album(al))

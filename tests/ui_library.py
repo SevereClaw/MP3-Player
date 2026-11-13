@@ -143,6 +143,19 @@ b = base64.b64encode(bytes(buf.data())).decode()
 for k in range(0, len(b), 20000):
     print("SHOTPART", "lib_addpl.jpg", k // 20000, b[k:k + 20000], flush=True)
 pop.close()
+w.go("tracks")
+w.set_sort("plays", True)
+w.tracks_view.setFocus()
+from PySide6.QtCore import QItemSelectionModel
+sm = w.tracks_view.selectionModel()
+for r in (1, 2, 4):
+    sm.select(w.tracks_view.model().index(r, 0), QItemSelectionModel.SelectionFlag.Select)
+sm.setCurrentIndex(w.tracks_view.model().index(4, 0), QItemSelectionModel.SelectionFlag.NoUpdate)
+__import__("time").sleep(0.5)
+dump("lib_tracks_sorted.jpg")
+w.set_filter("fav"); __import__("time").sleep(0.5); dump("lib_tracks_fav.jpg")
+w.set_filter("all")
+w.focus_sidebar(); w.focus_nav_step(w.nav["tracks"], 1); __import__("time").sleep(0.5); dump("lib_keyboard.jpg")
 w.go("albums"); dump("lib_albums.jpg")
 w.go("artists")
 for _ in range(80):                                   # фото исполнителей грузятся из интернета

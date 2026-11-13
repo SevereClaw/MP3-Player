@@ -407,6 +407,7 @@ class QueuePanel(QWidget):
         lay.addWidget(self.now)
         self.view = TrackView(win, show_album=False)
         self.view.reorder = self.moved
+        self.view.delete_cb = self.delete_paths
         self.view.external_drop = self.dropped
         lay.addWidget(self.view, 1)
         self.view.doubleClicked.connect(lambda ix: (self.o.queue_jump(ix.row()), self.refresh(True)))
@@ -449,6 +450,12 @@ class QueuePanel(QWidget):
         self.o.queue_insert(paths, row)
         self.refresh(True)
         self.win.toast(f"＋ {len(paths)} В ОЧЕРЕДЬ")
+
+    def delete_paths(self, paths):
+        rows = sorted({i.row() for i in self.view.selectedIndexes()}, reverse=True)
+        for r in rows:
+            self.o.queue_remove(r)
+        self.refresh(True)
 
     def clear(self):
         self.o.queue_clear()
@@ -510,6 +517,30 @@ class Strip(QListView):
         self.setFixedHeight(self.tiles.H + 22)
         self.setDragEnabled(True)
         self.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
+        self.home = None
+
+    def keyPressEvent(self, e):
+        k = e.key()
+        ix = self.currentIndex()
+        if k in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and ix.isValid():
+            from library_ui import sfx
+            sfx("select")
+            self.clicked.emit(ix)
+            return
+        if k in (Qt.Key.Key_Up, Qt.Key.Key_Down) and self.home is not None:
+            self.home.step_strip(self, -1 if k == Qt.Key.Key_Up else 1)
+            return
+        if k == Qt.Key.Key_Left and (not ix.isValid() or ix.row() == 0) and self.home is not None:
+            self.home.win.focus_sidebar()
+            return
+        super().keyPressEvent(e)
+
+    def currentChanged(self, cur, prev):
+        super().currentChanged(cur, prev)
+        if self.hasFocus() and cur.isValid():
+            from library_ui import sfx
+            sfx("hover")
+            self.scrollTo(cur)
 
     def wheelEvent(self, e):
         # колесо — листает полосу вбок (если её можно листать), иначе — страницу
@@ -561,6 +592,7 @@ class HomePage(QWidget):
             lb = QLabel(title)
             lb.setObjectName("sec")
             strip = Strip(win)
+            strip.home = self
             strip.clicked.connect(lambda ix, k=key, s=strip: self.clicked(k, s, ix))
             self.lay.addSpacing(10)
             self.lay.addWidget(lb)
@@ -571,6 +603,22 @@ class HomePage(QWidget):
         self.empty.setObjectName("shint")
         self.lay.addWidget(self.empty)
         self.lay.addStretch(1)
+
+    def step_strip(self, strip, d):
+        """↑ / ↓ — на соседний ряд, как по пунктам меню."""
+        vis = [st for _l, st, _k in self.sections.values() if st.isVisible()]
+        if strip not in vis:
+            return
+        i = vis.index(strip) + d
+        if 0 <= i < len(vis):
+            nxt = vis[i]
+            nxt.setFocus(Qt.FocusReason.OtherFocusReason)
+            if nxt.model().rowCount():
+                nxt.setCurrentIndex(nxt.model().index(min(strip.currentIndex().row(), nxt.model().rowCount() - 1)
+                                                      if strip.currentIndex().isValid() else 0, 0))
+            self.scroll.ensureWidgetVisible(nxt, 0, 60)
+        elif i < 0:
+            self.wave.go_btn.setFocus()
 
     def clicked(self, key, strip, ix):
         r = ix.data(Qt.ItemDataRole.UserRole)
