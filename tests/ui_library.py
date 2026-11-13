@@ -144,7 +144,16 @@ for k in range(0, len(b), 20000):
     print("SHOTPART", "lib_addpl.jpg", k // 20000, b[k:k + 20000], flush=True)
 pop.close()
 w.go("albums"); dump("lib_albums.jpg")
-w.go("artists"); dump("lib_artists.jpg")
+w.go("artists")
+for _ in range(80):                                   # фото исполнителей грузятся из интернета
+    app.processEvents(); _t.sleep(0.15) if False else __import__("time").sleep(0.15)
+dump("lib_artists.jpg")
+# переход между страницами — кадр посередине анимации
+w.go("albums"); __import__("time").sleep(0.12); app.processEvents(); w.trans.repaint()
+pm = w.grab(); buf = QBuffer(); buf.open(QIODevice.OpenModeFlag.WriteOnly); pm.save(buf, "JPG", 80)
+b = base64.b64encode(bytes(buf.data())).decode()
+for k in range(0, len(b), 20000):
+    print("SHOTPART", "lib_transition.jpg", k // 20000, b[k:k + 20000], flush=True)
 w.open_album(next(a for a in w.albums if a["title"].startswith("Persona"))); dump("lib_album.jpg")
 w.go("now"); dump("lib_now.jpg")
 from PySide6.QtCore import QPointF as _P

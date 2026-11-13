@@ -33,6 +33,90 @@ DIM = QColor("#7f98c4")
 FONT = "Segoe UI"
 
 
+# ---------------------------------------------------------------- звуки меню (свои, в духе P3R)
+_SFX = {"obj": None}
+
+
+def sfx(kind):
+    """hover — курсор по пункту, select — выбор, back — назад."""
+    o = _SFX["obj"]
+    if o is not None:
+        o.play(kind)
+
+
+class UISounds:
+    def __init__(self, folder, enabled_fn, volume_fn):
+        from PySide6.QtMultimedia import QSoundEffect
+        from PySide6.QtCore import QUrl
+        self.enabled_fn, self.volume_fn = enabled_fn, volume_fn
+        self.fx = {}
+        self._last_hover = 0.0
+        try:
+            os.makedirs(folder, exist_ok=True)
+            for kind, gen in (("hover", self._hover), ("select", self._select), ("back", self._back)):
+                f = os.path.join(folder, f"ui_{kind}_v1.wav")
+                if not os.path.isfile(f):
+                    self._write(f, gen())
+                e = QSoundEffect()
+                e.setSource(QUrl.fromLocalFile(f))
+                self.fx[kind] = e
+        except Exception:
+            self.fx = {}
+
+    @staticmethod
+    def _write(f, samples):
+        import struct
+        import wave as wav_std
+        import numpy as np
+        pcm = (np.clip(samples, -1, 1) * 32000).astype("<i2").tobytes()
+        with wav_std.open(f, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(44100)
+            w.writeframes(pcm)
+
+    @staticmethod
+    def _tone(freqs, dur, decay, sweep=0.0, start=0.0):
+        import numpy as np
+        sr = 44100
+        t = np.arange(int(sr * (start + dur))) / sr
+        out = np.zeros_like(t)
+        tt = np.clip(t - start, 0, None)
+        env = np.where(t >= start, np.exp(-tt * decay) * np.minimum(1, tt * 2000), 0)
+        for f, a in freqs:
+            ph = 2 * np.pi * (f * tt + 0.5 * sweep * tt * tt)
+            out += a * np.sin(ph)
+        return out * env
+
+    def _hover(self):            # короткий стеклянный «тик»
+        return 0.5 * self._tone([(2600, 0.7), (5200, 0.25)], 0.07, 70, sweep=-6000)
+
+    def _select(self):           # яркий двойной «динь» вверх
+        import numpy as np
+        a = self._tone([(1320, 0.6), (2640, 0.2)], 0.2, 22)
+        b = self._tone([(1980, 0.6), (3960, 0.2)], 0.26, 16, start=0.06)
+        n = max(len(a), len(b))
+        return 0.55 * (np.pad(a, (0, n - len(a))) + np.pad(b, (0, n - len(b))))
+
+    def _back(self):             # мягкий спуск вниз
+        return 0.5 * self._tone([(1500, 0.7), (3000, 0.15)], 0.14, 30, sweep=-5000)
+
+    def play(self, kind):
+        try:
+            if not self.enabled_fn() or kind not in self.fx:
+                return
+            now = time.monotonic()
+            if kind == "hover":
+                if now - self._last_hover < 0.045:
+                    return
+                self._last_hover = now
+            e = self.fx[kind]
+            e.setVolume(max(0.0, min(1.0, float(self.volume_fn()))) * (0.45 if kind == "hover" else 0.7))
+            e.play()
+        except Exception:
+            pass
+
+
 def pfont(size, bold=True, italic=True, weight=None):
     f = QFont(FONT)
     f.setPixelSize(int(size))
@@ -112,6 +196,16 @@ class CoverCache(QObject):
         self.queue = []
         self.lock = threading.Lock()
         self.busy = False
+        self.online = None           # fn(путь) → QImage|None — обложка из интернета (вызывается в фоне)
+        self.artist_fn = None        # fn(имя) → QImage|None — фото исполнителя
+
+    def get_artist(self, name):
+        """Фото исполнителя (из интернета, с кэшем) или None, пока ищется / не нашлось."""
+        return self.get("artist:" + name) if name else None
+
+    def forget_missing(self):
+        """Включили поиск в интернете — заново поискать то, чего не было."""
+        self.mem = {k: v for k, v in self.mem.items() if v is not None}
 
     def _disk(self, path):
         try:
@@ -143,18 +237,27 @@ class CoverCache(QObject):
                     if not self.queue:
                         return
                     path = self.queue.pop()          # последние запрошенные — первыми (то, что на экране)
+                if path.startswith("artist:"):
+                    img = None
+                    if self.artist_fn:
+                        try:
+                            img = self.artist_fn(path[7:])
+                        except Exception:
+                            img = None
+                    self.mem[path] = img
+                    self.ready.emit(path)
+                    continue
                 img = None
+                local_missing = False
                 disk = self._disk(path)
                 if os.path.isfile(disk):
                     img = QImage(disk)
                     if img.isNull():
                         img = None
                     elif img.width() <= 2:
-                        img = None               # метка «обложки нет»
-                        self.mem[path] = None
-                        self.ready.emit(path)
-                        continue
-                if img is None:
+                        img = None               # метка «в файле обложки нет»
+                        local_missing = True
+                if img is None and not local_missing:
                     data = libmod.read_tags(path).get("cover")
                     if not data:
                         side = self._side_image(path)
@@ -170,6 +273,11 @@ class CoverCache(QObject):
                         (img if img is not None else QImage(1, 1, QImage.Format.Format_RGB32)).save(disk, "JPG", 88)
                     except Exception:
                         pass
+                if img is None and self.online:                    # своей нет — поискать в интернете
+                    try:
+                        img = self.online(path)
+                    except Exception:
+                        img = None
                 self.mem[path] = img
                 self.ready.emit(path)
         finally:
@@ -293,6 +401,13 @@ class TileDelegate(QStyledItemDelegate):
             pm = (QPixmap.fromImage(img.scaled(int(side), int(side), Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                                                Qt.TransformationMode.SmoothTransformation)).copy(0, 0, int(side), int(side))
                   if img is not None else placeholder(int(side), r.get("title", "")))
+        elif self.round_art and r.get("name"):
+            img = self.win.covers.get_artist(r["name"])           # фото исполнителя из интернета
+            if img is not None:
+                pm = QPixmap.fromImage(img.scaled(int(side), int(side), Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                                                  Qt.TransformationMode.SmoothTransformation)).copy(0, 0, int(side), int(side))
+            else:
+                pm = cover_pixmap(self.win.covers, r.get("cover_path"), int(side), r.get("name"))
         else:
             pm = cover_pixmap(self.win.covers, r.get("cover_path"), int(side), r.get("title") or r.get("name"))
         if self.round_art:
@@ -340,7 +455,28 @@ class TileDelegate(QStyledItemDelegate):
         p.restore()
 
 
-class TileView(QListView):
+class _HoverSfx:
+    """Звук курсора, когда мышь переходит на другую плитку / строку."""
+
+    def _hover_sfx(self, e):
+        ix = self.indexAt(e.position().toPoint())
+        r = ix.row() if ix.isValid() else -1
+        if r != getattr(self, "_hover_row", -1):
+            self._hover_row = r
+            if r >= 0:
+                sfx("hover")
+
+
+class TileView(QListView, _HoverSfx):
+    def mouseMoveEvent(self, e):
+        self._hover_sfx(e)
+        super().mouseMoveEvent(e)
+
+    def mousePressEvent(self, e):
+        if self.indexAt(e.position().toPoint()).isValid():
+            sfx("select")
+        super().mousePressEvent(e)
+
     def __init__(self, win, round_art=False):
         super().__init__()
         self.setViewMode(QListView.ViewMode.IconMode)
@@ -442,7 +578,15 @@ class TrackDelegate(QStyledItemDelegate):
         p.restore()
 
 
-class TrackView(QListView):
+class TrackView(QListView, _HoverSfx):
+    def mouseMoveEvent(self, e):
+        self._hover_sfx(e)
+        super().mouseMoveEvent(e)
+
+    def mouseDoubleClickEvent(self, e):
+        sfx("select")
+        super().mouseDoubleClickEvent(e)
+
     def __init__(self, win, show_album=True):
         super().__init__()
         self.setMouseTracking(True)
@@ -691,8 +835,10 @@ class DetailPage(QWidget):
             rows.append({"path": pth, "title": t, "artist": a, "album": alb, "d": it.get("d"), "num": i + 1})
         self.tracks.setItemDelegate(TrackDelegate(self.win, show_album=True))
         self.tracks.model_.set_rows(rows)
+        cov = self.win.covers
         self.header.set("ИСПОЛНИТЕЛЬ", ar["name"], f"{len(ar['albums'])} альб.",
-                        f"{len(self.paths)} трек. · {fmt_total(dur)}", ar["cover_path"])
+                        f"{len(self.paths)} трек. · {fmt_total(dur)}", ar["cover_path"],
+                        cover_fn=lambda n=ar["name"], cp=ar["cover_path"]: cov.get_artist(n) or cov.get(cp))
 
 
 # ---------------------------------------------------------------- «Сейчас играет»
@@ -1068,9 +1214,17 @@ class NowPlaying(QWidget):
 
 
 # ---------------------------------------------------------------- кнопки
-class NavButton(QPushButton):
+class _Clicky:
+    """Звук выбора при нажатии (кнопка «назад» — свой звук)."""
+
+    def _sfx_click(self):
+        sfx("back" if "НАЗАД" in self.text() else "select")
+
+
+class NavButton(QPushButton, _Clicky):
     def __init__(self, text, small=False):
         super().__init__(text)
+        self.pressed.connect(self._sfx_click)
         self.small = small
         self.setCheckable(not small)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1082,6 +1236,7 @@ class NavButton(QPushButton):
 
     def enterEvent(self, _e):
         self._hover = True
+        sfx("hover")
         self.update()
 
     def leaveEvent(self, _e):
@@ -1114,6 +1269,7 @@ class IconButton(QPushButton):
 
     def __init__(self, kind, size=46):
         super().__init__()
+        self.pressed.connect(lambda: sfx("select"))
         self.kind = kind
         self.setFixedSize(int(size * 1.35), size)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1122,6 +1278,7 @@ class IconButton(QPushButton):
 
     def enterEvent(self, _e):
         self._hover = True
+        sfx("hover")
         self.update()
 
     def leaveEvent(self, _e):
@@ -1322,6 +1479,7 @@ class P3Toggle(QWidget):
 
     def mousePressEvent(self, e):
         if self.enabled_ and e.button() == Qt.MouseButton.LeftButton:
+            sfx("select")
             self.toggled.emit()
 
     def paintEvent(self, _e):
@@ -1354,6 +1512,7 @@ class P3Chip(QPushButton):
 
     def __init__(self, text):
         super().__init__(text)
+        self.pressed.connect(lambda: sfx("select"))
         self.setCheckable(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFixedHeight(30)
@@ -1363,6 +1522,7 @@ class P3Chip(QPushButton):
 
     def enterEvent(self, _e):
         self._hover = True
+        sfx("hover")
         self.update()
 
     def leaveEvent(self, _e):
@@ -1502,6 +1662,13 @@ class SettingsPage(QWidget):
         self.section("МЕДИАТЕКА")
         self.toggle("Открывать медиатеку при запуске", lambda: cfg("start_library", True), o.toggle_lib_start,
                     "Иначе при запуске — маленький плеер на рабочем столе")
+        self.toggle("Обложки и фото исполнителей из интернета", lambda: cfg("online_art", True),
+                    lambda: self.flip("online_art", True, after=self.win.covers.forget_missing),
+                    "Для треков без своей картинки — с iTunes и Deezer")
+        self.toggle("Анимация переходов", lambda: cfg("ui_anim", True), lambda: self.flip("ui_anim", True),
+                    "Страницы выезжают скошенной полосой, как меню P3R")
+        self.toggle("Звуки меню", lambda: cfg("ui_sounds", True), lambda: self.flip("ui_sounds", True),
+                    "Курсор, выбор и «назад» — громкость как у звуков кнопок")
         self.actions("Папки с музыкой", [("+ ДОБАВИТЬ ПАПКУ", self.add_folder),
                                          ("⟳ ПЕРЕСКАНИРОВАТЬ", lambda: o.scan_library(force=True))],
                      "Отсюда медиатека берёт альбомы и исполнителей")
@@ -1590,6 +1757,13 @@ class SettingsPage(QWidget):
         self.actions("Если что-то не работает", [("🛠 ДИАГНОСТИКА", o.show_diagnostics)])
         self.lay.addStretch(1)
 
+    def flip(self, key, default, after=None):
+        self.o.cfg[key] = not self.o.cfg.get(key, default)
+        self.o.save_later()
+        if after:
+            after()
+        self.win.rebuild(force=True) if key == "online_art" else None
+
     # ---------- папки
     def add_folder(self):
         from PySide6.QtWidgets import QFileDialog
@@ -1640,6 +1814,81 @@ class SettingsPage(QWidget):
         super().showEvent(e)
 
 
+
+# ---------------------------------------------------------------- переход между разделами (как меню P3R)
+class Transition(QWidget):
+    """Новая страница «въезжает» скошенной полосой, старая уезжает и гаснет; по краю — голубая плашка."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.old = self.new = None
+        self.t = 1.0
+        self.back = False
+        self._t0 = 0.0
+        self.dur = 0.32
+        self.timer = QTimer(self, interval=12)
+        self.timer.timeout.connect(self._step)
+        self.hide()
+
+    def start(self, old_pm, new_pm, back=False):
+        self.old, self.new, self.back = old_pm, new_pm, back
+        self.setGeometry(self.parentWidget().rect())
+        self._t0 = time.monotonic()
+        self.t = 0.0
+        self.show()
+        self.raise_()
+        self.timer.start()
+
+    def _step(self):
+        self.t = min(1.0, (time.monotonic() - self._t0) / self.dur)
+        if self.t >= 1.0:
+            self.timer.stop()
+            self.hide()
+            self.old = self.new = None
+            return
+        self.update()
+
+    def paintEvent(self, _e):
+        if self.old is None:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        w, h = self.width(), self.height()
+        e = 1 - (1 - self.t) ** 3                                   # быстрое начало, мягкий конец
+        sk = h * 0.35
+        d = -1 if self.back else 1
+        # старая страница уезжает в сторону и гаснет
+        p.setOpacity(1 - e * 0.85)
+        p.drawPixmap(int(-d * w * 0.18 * e), 0, self.old)
+        p.setOpacity(1.0)
+        # новая — открывается скошенной полосой
+        edge = (w + sk) * (1 - e)                                    # левый край новой страницы (вперёд)
+        if not self.back:
+            poly = QPolygonF([QPointF(edge, 0), QPointF(w + sk, 0), QPointF(w + sk, h), QPointF(edge - sk, h)])
+            band = QPolygonF([QPointF(edge - 22, 0), QPointF(edge + 4, 0), QPointF(edge - sk + 4, h),
+                              QPointF(edge - sk - 22, h)])
+        else:
+            edge = w - edge + sk
+            poly = QPolygonF([QPointF(-sk, 0), QPointF(edge, 0), QPointF(edge - sk, h), QPointF(-sk, h)])
+            band = QPolygonF([QPointF(edge - 4, 0), QPointF(edge + 22, 0), QPointF(edge - sk + 22, h),
+                              QPointF(edge - sk - 4, h)])
+        path = QPainterPath()
+        path.addPolygon(poly)
+        p.save()
+        p.setClipPath(path)
+        p.drawPixmap(int(d * w * 0.06 * (1 - e)), 0, self.new)
+        p.restore()
+        g = QLinearGradient(QPointF(0, 0), QPointF(0, h))
+        g.setColorAt(0, WHITE)
+        g.setColorAt(1, CYAN)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(g)
+        p.setOpacity(1 - e * 0.6)
+        p.drawPolygon(band)
+        p.end()
+
 class LibraryWindow(QWidget):
     """Большое окно «Медиатека». owner — Mp3Widget (плеер)."""
     closed = Signal()
@@ -1653,6 +1902,13 @@ class LibraryWindow(QWidget):
         self.setMinimumSize(980, 620)
         self.covers = CoverCache(cache_dir)
         self.covers.ready.connect(self._cover_ready)
+        self.covers.online = self._online_cover
+        self.covers.artist_fn = self._online_artist
+        self._online_dir = os.path.join(cache_dir, "online")
+        self._online_lock = threading.Lock()
+        cfg = lambda k, d=None: owner.cfg.get(k, d) if hasattr(owner, "cfg") else d
+        _SFX["obj"] = UISounds(os.path.join(cache_dir, "..", "sounds"), lambda: cfg("ui_sounds", True),
+                               lambda: cfg("sfx_volume", 0.5))
         self.items = {}
         self.albums, self.artists = [], []
         self.history = []
@@ -1775,6 +2031,7 @@ class LibraryWindow(QWidget):
         self.queue.hide()
         mid.addWidget(self.queue)
         right.addLayout(mid, 1)
+        self.trans = Transition(self.stack)
         self.bar = PlayerBar(self)
         right.addWidget(self.bar)
         root.addLayout(right, 1)
@@ -1885,8 +2142,7 @@ class LibraryWindow(QWidget):
             self.go("tracks", remember=False)
 
     def _cover_ready(self, path):
-        for v in (self.albums_view, self.artists_view):
-            v.model_.refresh_path(path)
+        for v in (self.albums_view, self.artists_view, self.tracks_view, self.detail.tracks):
             v.viewport().update()
         self.detail.header.update()
         for _lb, strip, _k in self.home.sections.values():
@@ -1896,17 +2152,36 @@ class LibraryWindow(QWidget):
             self.now.update()
 
     # ------------------------------------------------------------ навигация
-    def go(self, key, remember=True):
+    def go(self, key, remember=True, back=False):
         cur = self.stack.currentWidget()
         if remember and cur is not None and cur is not self.pages.get(key):
             self.history.append(self._state())
             self.history = self.history[-30:]
-        self.stack.setCurrentWidget(self.pages[key])
+        new = self.pages[key]
+        anim = (self.isVisible() and cur is not None and (cur is not new or key == "detail")
+                and getattr(self.owner, "cfg", {}).get("ui_anim", True))
+        old_pm = self._snap(cur) if anim else None
+        self.stack.setCurrentWidget(new)
+        if anim:
+            new.resize(self.stack.size())
+            self.trans.start(old_pm, self._snap(new), back=back)
         for k, b in self.nav.items():
             b.setChecked(k == key)
         self.timer.setInterval(16 if key in ("now", "home") else 250)      # волны и «Сейчас играет» — 60 кадров
         if hasattr(self, "pl_btns"):
             self._mark_playlist()
+
+    def _snap(self, page):
+        """Снимок страницы вместе с фоном окна (страницы прозрачные — фон рисует окно)."""
+        pm = QPixmap(self.stack.size())
+        p = QPainter(pm)
+        off = self.stack.mapTo(self, QPoint(0, 0))
+        p.translate(-off.x(), -off.y())
+        paint_bg(p, self.rect())
+        p.translate(off.x(), off.y())
+        page.render(p, QPoint(0, 0), renderFlags=QWidget.RenderFlag.DrawChildren)
+        p.end()
+        return pm
 
     def _state(self):
         w = self.stack.currentWidget()
@@ -1915,8 +2190,9 @@ class LibraryWindow(QWidget):
         return (next((k for k, v in self.pages.items() if v is w), "home"), None)
 
     def go_back(self):
+        sfx("back")
         if not self.history:
-            self.go("home", remember=False)
+            self.go("home", remember=False, back=True)
             return
         key, obj = self.history.pop()
         if key == "detail" and obj is not None:
@@ -1930,8 +2206,61 @@ class LibraryWindow(QWidget):
             else:
                 (self.detail.show_album if kind == "album" else self.detail.show_artist)(data)
             self._detail_obj = obj
-        self.go(key, remember=False)
+        self.go(key, remember=False, back=True)
         self._mark_playlist()
+
+    # ------------------------------------------------------------ обложки и фото из интернета (в фоне)
+    def _online_cached(self, key, url_fn):
+        import online_art as oa
+        os.makedirs(self._online_dir, exist_ok=True)
+        h = hashlib.md5("|".join(key).encode("utf-8", "replace")).hexdigest()
+        f = os.path.join(self._online_dir, h + ".jpg")
+        none = os.path.join(self._online_dir, h + ".none")
+        if os.path.isfile(f):
+            img = QImage(f)
+            return None if img.isNull() else img
+        if os.path.isfile(none) and time.time() - os.path.getmtime(none) < 14 * 86400:
+            return None                                   # недавно искали — не нашлось
+        try:
+            url = url_fn()
+        except oa.Offline:
+            return None                                   # нет сети — попробуем в другой раз
+        if not url:
+            open(none, "w").close()
+            return None
+        try:
+            img = QImage.fromData(oa.get_bytes(url))
+        except Exception:
+            return None
+        if img.isNull():
+            return None
+        img = img.scaled(360, 360, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
+        img.save(f, "JPG", 90)
+        return img
+
+    def _online_on(self):
+        return getattr(self.owner, "cfg", {}).get("online_art", True)
+
+    def _online_cover(self, path):
+        if not self._online_on():
+            return None
+        import online_art as oa
+        it = self.lib.items.get(path) or {}
+        ga, gt = libmod.guess_from_name(path)
+        artist, album, title = it.get("a") or ga, it.get("al") or "", it.get("t") or gt
+        if album:
+            key = ("al", libmod.norm(artist), libmod.norm(album))
+            return self._online_cached(key, lambda: oa.album_cover_url(artist, album))
+        if artist and title:
+            key = ("tr", libmod.norm(artist), libmod.norm(title))
+            return self._online_cached(key, lambda: oa.track_cover_url(artist, title))
+        return None
+
+    def _online_artist(self, name):
+        if not self._online_on() or name in (libmod.UNKNOWN_ARTIST, libmod.VARIOUS):
+            return None
+        import online_art as oa
+        return self._online_cached(("ar", libmod.norm(name)), lambda: oa.artist_photo_url(name))
 
     # ------------------------------------------------------------ плейлисты
     def sync_playlists(self):

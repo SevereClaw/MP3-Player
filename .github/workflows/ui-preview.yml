@@ -12,6 +12,11 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - run: pip install -r requirements.txt
+      - name: Online art (live)
+        continue-on-error: true
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python tests/test_online_art.py
       - name: Screenshots
         env:
           PYTHONIOENCODING: utf-8
