@@ -1278,6 +1278,10 @@ class NowPlaying(QWidget):
         self._rings = []                # [возраст, сила]
         self._parts = []                # [x, y, vx, vy, возраст, жизнь, размер, вид]
         self._mote_acc = 0.0
+        self._lyr_search_until = 0.0    # идёт поиск текста в интернете (по ПКМ)
+        sig = getattr(win.owner, "lyr_sig", None)
+        if sig is not None and hasattr(sig, "done"):
+            sig.done.connect(self._lyrics_answer)
         self._glide_until = 0.0         # после клика по строке текст плавно доезжает, а не прыгает
         self._pulse = (-1, 0.0)         # (строка, когда кликнули) — вспышка на выбранной строке
         self.wave = WavePanel(win)
@@ -1451,6 +1455,7 @@ class NowPlaying(QWidget):
         has_img = not clip.image().isNull()
         has_txt = bool((clip.text() or "").strip())
         m = QMenu(self)
+        m.addAction("🌐  Найти текст в интернете", self.find_lyrics_online)
         a = m.addAction("📋  Вставить текст песни из буфера", lambda: self.set_lyrics_text(path, clip.text()))
         a.setEnabled(has_txt)
         m.addAction("📄  Текст песни из файла (.lrc, .txt)…", lambda: self.pick_lyrics_file(path))
@@ -1461,6 +1466,32 @@ class NowPlaying(QWidget):
         if self.win.covers.custom(path) is not None:
             m.addAction("✖  Убрать свою картинку", lambda: self.set_picture(path, None))
         m.exec(e.globalPos())
+
+    def find_lyrics_online(self):
+        """Поискать текст текущего трека на lrclib.net (с таймкодами). Ответ придёт в _lyrics_answer."""
+        o = self.win.owner
+        fetch = getattr(o, "fetch_lyrics_online", None)
+        if not callable(fetch):
+            return
+        if not o.cfg.get("lyrics", True):                    # показ текста выключен — включить, раз просят
+            o.cfg["lyrics"] = True
+        self._lyr_search_until = time.monotonic() + 25
+        self.win.toast("🌐 ИЩУ ТЕКСТ…")
+        fetch(manual=True)
+        self.update()
+
+    def _lyrics_answer(self, path, lrc, why, manual):
+        if not manual or time.monotonic() > self._lyr_search_until:
+            return
+        self._lyr_search_until = 0.0
+        if path != getattr(self.win.owner, "loaded_path", None):
+            return
+        if lrc:
+            self.scroll = None
+            self.win.toast("🌐 ТЕКСТ НАЙДЕН")
+        else:
+            self.win.toast(("🌐 " + (why or "текст не найден")).upper()[:60])
+        self.update()
 
     def set_picture(self, path, img):
         if img is not None and img.isNull():
@@ -1947,8 +1978,9 @@ class NowPlaying(QWidget):
             p.setPen(DIM)
             self._line_hits = []
             p.drawText(box.adjusted(4, 10, 0, 0), Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft,
-                       "ТЕКСТА НЕТ\n\nПоложи .lrc рядом с треком или сделай его сам:\n"
-                       "меню плеера → Текст песни → Создать текст под песню")
+                       "ИЩУ ТЕКСТ В ИНТЕРНЕТЕ…" if now < self._lyr_search_until else
+                       "ТЕКСТА НЕТ\n\nПравый клик → «Найти текст в интернете»\n"
+                       "или вставь свой: скопируй текст → правый клик → «Вставить текст песни»")
         p.end()
 
 

@@ -249,6 +249,13 @@ print("вставленный текст:", _lrc.replace("\n", " | "))
 assert _lrc.count("[") == 3 and "первая строка" in _lrc and "Verse" not in _lrc, _lrc
 w.now.set_lyrics_text(owner.loaded_path, "[00:01.00]раз\n[00:05.50]два")
 assert open(_linked[1], encoding="utf-8").read().startswith("[00:01.00]раз"), "таймкоды должны остаться как есть"
+_net = []                                                 # ПКМ → «Найти текст в интернете»
+owner.fetch_lyrics_online = lambda manual=False: _net.append(manual)
+w.now.find_lyrics_online()
+assert _net == [True] and w.now._lyr_search_until > 0, _net
+w.now._lyrics_answer(owner.loaded_path, "", "текст не найден", True)
+print("поиск текста в интернете:", _net, "→", w._toast.text())
+assert w.now._lyr_search_until == 0 and "НЕ НАЙДЕН" in w._toast.text()
 for _ in range(45):                                       # эффекты под бит: кольца и частицы
     __import__("time").sleep(0.03); w.now.repaint()
 print("эффекты под бит: частиц", len(w.now._parts), "колец", len(w.now._rings))
