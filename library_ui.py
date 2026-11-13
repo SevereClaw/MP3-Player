@@ -1203,9 +1203,30 @@ class NowPlaying(QWidget):
 
     def mouseMoveEvent(self, e):
         self.mouse = e.position()
+        on = self._line_at(self.mouse) is not None
+        self.setCursor(Qt.CursorShape.PointingHandCursor if on else Qt.CursorShape.ArrowCursor)
 
     def leaveEvent(self, _e):
         self.mouse = None
+
+    def _line_at(self, pos):
+        for rect, t in getattr(self, "_line_hits", []):
+            if rect.contains(pos):
+                return t
+        return None
+
+    def mousePressEvent(self, e):
+        """Клик по строке текста — перемотать на неё."""
+        t = self._line_at(e.position())
+        if t is not None and e.button() == Qt.MouseButton.LeftButton:
+            sfx("select")
+            o = self.win.owner
+            o.player.setPosition(int(max(0, t)))
+            if not o.is_playing():
+                o.toggle_play()
+            self.scroll = None                  # список сразу встанет на эту строку
+            return
+        super().mousePressEvent(e)
 
     def _cover_pm(self, img, side, seed):
         key = (img.cacheKey() if img is not None else seed, side)
@@ -1362,8 +1383,17 @@ class NowPlaying(QWidget):
             first = max(0.0, min(self.scroll - rows // 3, float(max(0, n - rows))))
             p.save()
             p.setClipRect(box.adjusted(-20, -6, 20, 0))
+            self._line_hits = []
             for k in range(max(0, int(first) - 1), min(n, int(first) + rows + 2)):
                 yy = box.top() + (k - first) * line_h
+                hit = QRectF(x - 8, yy, w + 8, line_h)
+                if box.adjusted(-20, -6, 20, 0).intersects(hit):
+                    self._line_hits.append((hit, lyr.times[k]))
+                    if self.mouse is not None and hit.contains(self.mouse) and k != i:
+                        hv_c = QColor(47, 211, 255, 28)          # строка под мышкой — клик перемотает сюда
+                        p.setPen(Qt.PenStyle.NoPen)
+                        p.setBrush(hv_c)
+                        p.drawPolygon(skew_poly(hit.adjusted(0, 3, 0, -3), 12))
                 text = lyr.lines[k] or "♪"
                 fk = max(0.0, 1.0 - abs(k - self.scroll))             # насколько строка «текущая» (0..1)
                 edge = min(1.0, max(0.0, (yy - box.top() + line_h) / line_h),
@@ -1412,6 +1442,7 @@ class NowPlaying(QWidget):
         else:
             p.setFont(pfont(18, weight=QFont.Weight.Bold))
             p.setPen(DIM)
+            self._line_hits = []
             p.drawText(box.adjusted(4, 10, 0, 0), Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft,
                        "ТЕКСТА НЕТ\n\nПоложи .lrc рядом с треком или сделай его сам:\n"
                        "меню плеера → Текст песни → Создать текст под песню")
