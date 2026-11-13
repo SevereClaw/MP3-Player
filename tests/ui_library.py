@@ -207,6 +207,20 @@ for k in range(0, len(b), 20000):
     print("SHOTPART", "lib_transition.jpg", k // 20000, b[k:k + 20000], flush=True)
 w.open_album(next(a for a in w.albums if a["title"].startswith("Persona"))); dump("lib_album.jpg")
 w.go("now"); dump("lib_now.jpg")
+from PySide6.QtGui import QMouseEvent                     # клик по строке текста — плавно доезжает, не прыгает
+from PySide6.QtCore import QEvent
+w.now.repaint()
+_hit, _t, _k = w.now._line_hits[-1]
+_s0 = w.now.scroll
+app.sendEvent(w.now, QMouseEvent(QEvent.Type.MouseButtonPress, _hit.center(), w.now.mapToGlobal(_hit.center()),
+                                 Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+_path = []
+for _ in range(8):
+    __import__("time").sleep(0.02); w.now.repaint(); _path.append(round(w.now.scroll, 2))
+print("текст едет к строке", _k, "от", round(_s0, 2), ":", _path)
+assert _s0 < _path[0] < _path[-1] <= _k and _path[0] - _s0 < (_k - _s0) * 0.5, _path
+dump("lib_now_glide.jpg")
+w.now._glide_until = 0; w.now.scroll = None
 _rep = []                                                 # кнопка повтора: список → трек → выкл
 owner.set_repeat = lambda m: (_rep.append(m), setattr(owner, "repeat", m))
 for _ in range(3):

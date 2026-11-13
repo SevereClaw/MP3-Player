@@ -1200,6 +1200,8 @@ class NowPlaying(QWidget):
         self.vol_v = None               # показанное значение (плавно догоняет настоящее)
         self.vol_kick = 0.0             # толчок при каждом щелчке колеса (+ громче, − тише)
         self._wheel_acc = 0.0
+        self._glide_until = 0.0         # после клика по строке текст плавно доезжает, а не прыгает
+        self._pulse = (-1, 0.0)         # (строка, когда кликнули) — вспышка на выбранной строке
         self.wave = WavePanel(win)
         self.wave.setParent(self)
 
@@ -1304,10 +1306,10 @@ class NowPlaying(QWidget):
                    f"{int(round(self.vol_v * 100))}" if real > 0 else "ВЫКЛ")
         p.restore()
 
-    def _line_at(self, pos):
-        for rect, t in getattr(self, "_line_hits", []):
+    def _line_at(self, pos, index=False):
+        for rect, t, k in getattr(self, "_line_hits", []):
             if rect.contains(pos):
-                return t
+                return k if index else t
         return None
 
     def mousePressEvent(self, e):
@@ -1319,7 +1321,9 @@ class NowPlaying(QWidget):
             o.player.setPosition(int(max(0, t)))
             if not o.is_playing():
                 o.toggle_play()
-            self.scroll = None                  # список сразу встанет на эту строку
+            now = time.monotonic()
+            self._glide_until = now + 1.5       # текст плавно доедет до этой строки, как бы далеко она ни была
+            self._pulse = (self._line_at(e.position(), index=True), now)
             return
         super().mousePressEvent(e)
 
@@ -1474,9 +1478,18 @@ class NowPlaying(QWidget):
             line_h = 44
             rows = max(1, int(box.height() // line_h))
             # строки плавно «едут» к текущей, а не прыгают
-            if self.scroll is None or abs(self.scroll - i) > 6:
+            gliding = now < self._glide_until
+            if gliding and now - self._pulse[1] < 0.35 and 0 <= self._pulse[0] < n:
+                i = self._pulse[0]                              # движок ещё перематывает — уже едем к выбранной
+            if self.scroll is None or (abs(self.scroll - i) > 6 and not gliding):
                 self.scroll = float(i)
-            self.scroll = ease(self.scroll, float(i), 7.5)
+            if gliding:                                         # плавный разгон и торможение, без рывка в начале
+                dist = float(i) - self.scroll
+                stepv = dist * (1 - math.exp(-dt * 9.0))
+                cap = max(0.6, abs(dist) * 0.9) * dt * 14
+                self.scroll += max(-cap, min(cap, stepv))
+            else:
+                self.scroll = ease(self.scroll, float(i), 7.5)
             first = max(0.0, min(self.scroll - rows // 3, float(max(0, n - rows))))
             p.save()
             p.setClipRect(box.adjusted(-20, -6, 20, 0))
@@ -1485,7 +1498,7 @@ class NowPlaying(QWidget):
                 yy = box.top() + (k - first) * line_h
                 hit = QRectF(x - 8, yy, w + 8, line_h)
                 if box.adjusted(-20, -6, 20, 0).intersects(hit):
-                    self._line_hits.append((hit, lyr.times[k]))
+                    self._line_hits.append((hit, lyr.times[k], k))
                     if self.mouse is not None and hit.contains(self.mouse) and k != i:
                         hv_c = QColor(47, 211, 255, 28)          # строка под мышкой — клик перемотает сюда
                         p.setPen(Qt.PenStyle.NoPen)
@@ -1508,6 +1521,12 @@ class NowPlaying(QWidget):
                     p.setPen(Qt.PenStyle.NoPen)
                     p.setBrush(QColor(47, 211, 255, int(60 * fk * edge)))
                     p.drawPolygon(skew_poly(band, 12))
+                if k == self._pulse[0] and now - self._pulse[1] < 0.6:      # вспышка на выбранной строке
+                    pu = 1.0 - (now - self._pulse[1]) / 0.6
+                    pb = QRectF(x - 8 - 14 * (1 - pu), yy + 2, min(w, tw * sc + 46) + 28 * (1 - pu), line_h - 6)
+                    p.setPen(Qt.PenStyle.NoPen)
+                    p.setBrush(QColor(255, 255, 255, int(90 * pu * pu * edge)))
+                    p.drawPolygon(skew_poly(pb, 12))
                 c = QColor(WHITE)
                 base = max(50, 190 - abs(k - self.scroll) * 35)
                 c.setAlpha(int((base + (255 - base) * fk) * edge))
