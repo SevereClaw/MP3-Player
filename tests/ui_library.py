@@ -228,6 +228,12 @@ owner.start_wave = lambda m=None: _wave.append(m)
 w.now.wave.chips["fav"].click()
 print("волна по нажатию характера:", _wave)
 assert _wave == ["fav"], _wave
+w.now.repaint()                                           # клик по большой обложке — тоже запускает волну
+_c = w.now.cover_rect.center()
+app.sendEvent(w.now, QMouseEvent(QEvent.Type.MouseButtonPress, _c, w.now.mapToGlobal(_c),
+                                 Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+print("волна по клику на обложку:", _wave)
+assert len(_wave) == 2, _wave
 owner.start_wave, owner.wave_active = _sw, _wa
 _rep = []                                                 # кнопка повтора: список → трек → выкл
 owner.set_repeat = lambda m: (_rep.append(m), setattr(owner, "repeat", m))

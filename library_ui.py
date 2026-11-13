@@ -1241,7 +1241,7 @@ class NowPlaying(QWidget):
     def mouseMoveEvent(self, e):
         self.mouse = e.position()
         self._mouse_t = time.monotonic()
-        on = self._line_at(self.mouse) is not None
+        on = self._line_at(self.mouse) is not None or self.cover_rect.contains(self.mouse)
         self.setCursor(Qt.CursorShape.PointingHandCursor if on else Qt.CursorShape.ArrowCursor)
 
     def leaveEvent(self, _e):
@@ -1343,7 +1343,16 @@ class NowPlaying(QWidget):
         return None
 
     def mousePressEvent(self, e):
-        """Клик по строке текста — перемотать на неё."""
+        """Клик по строке текста — перемотать на неё; клик по обложке — запустить «Мою волну»."""
+        if e.button() == Qt.MouseButton.LeftButton and self.cover_rect.contains(e.position()):
+            sfx("select")
+            if self.wave.active():
+                self.win.toast("МОЯ ВОЛНА УЖЕ ИГРАЕТ")
+            else:
+                self.win.owner.start_wave(self.win.owner.cfg.get("wave_mode", "mix"))
+                self.win.toast("🌊 МОЯ ВОЛНА")
+                QTimer.singleShot(100, self.wave.sync)
+            return
         t = self._line_at(e.position())
         if t is not None and e.button() == Qt.MouseButton.LeftButton:
             sfx("select")
