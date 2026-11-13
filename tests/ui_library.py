@@ -37,6 +37,17 @@ for al, ar, tracks, col in data:
         pt.drawText(img.rect().adjusted(20, 20, -20, -20), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom | Qt.TextFlag.TextWordWrap, al[:14])
         pt.end()
         covers[p] = img
+# дубликаты: те же песни в другой папке / формате
+for src, dst in (("C:\\Music\\Группа крови\\01. Кино - Группа крови.flac", "D:\\Скачанное\\Кино - Группа крови.mp3"),
+                 ("C:\\Music\\Unravel\\01. TK from 凛として時雨 - unravel.flac", "D:\\Аниме\\unravel.m4a"),
+                 ("C:\\Music\\Unravel\\01. TK from 凛として時雨 - unravel.flac", "D:\\Аниме\\unravel (1).mp3")):
+    it = dict(lib.items[src]); it["s"] = 5_000_000; it["d"] = it["d"] + 1
+    lib.items[dst] = it
+    covers[dst] = covers[src]
+for p in lib.items:
+    lib.items[p].setdefault("s", 30_000_000)
+    if lib.items[p]["s"] == 1:
+        lib.items[p]["s"] = 32_000_000
 lib._rebuild_hay()
 cur = next(p for p in lib.items if "Full Moon" in p)
 
@@ -83,10 +94,19 @@ class FakeOwner:
         import datetime as _d
         today = _d.date.today().isoformat()
         self.cfg["recent"] = ps[::3]
+        import random as _r
+        _r.seed(3)
+        days_ = {(_d.date.today() - _d.timedelta(days=k)).isoformat(): _r.choice([0, 600, 1800, 3600, 5400, 7200, 2400])
+                 for k in range(400)}
+        daily_ = {}
+        for k in range(30):
+            dd = (_d.date.today() - _d.timedelta(days=k)).isoformat()
+            daily_[dd] = {p: {"s": _r.randint(0, 900), "p": _r.randint(0, 3)} for p in _r.sample(ps, 6)}
         self.stats = types.SimpleNamespace(data={
+            "days": days_,
             "tracks": {p: {"sec": 200 * (i % 7 + 1), "plays": i % 5 + 1, "last": "2026-09-01" if i % 4 == 0 else today}
                        for i, p in enumerate(ps)},
-            "daily": {today: {p: {"s": 100 * (i % 6 + 1), "p": 1} for i, p in enumerate(ps)}}})
+            "daily": {**daily_, today: {p: {"s": 100 * (i % 6 + 1), "p": 1} for i, p in enumerate(ps)}}})
         self.spectrum = types.SimpleNamespace(available=True)
 
     def __getattr__(self, name):
@@ -156,6 +176,12 @@ dump("lib_tracks_sorted.jpg")
 w.set_filter("fav"); __import__("time").sleep(0.5); dump("lib_tracks_fav.jpg")
 w.set_filter("all")
 w.focus_sidebar(); w.focus_nav_step(w.nav["tracks"], 1); __import__("time").sleep(0.5); dump("lib_keyboard.jpg")
+w.go("stats"); __import__("time").sleep(0.3); dump("lib_stats.jpg")
+w.stats_page.findChildren(__import__("PySide6.QtWidgets", fromlist=["QScrollArea"]).QScrollArea)[0].verticalScrollBar().setValue(500)
+dump("lib_stats2.jpg")
+w.go("dups"); __import__("time").sleep(0.5); dump("lib_dups.jpg")
+import library_stats
+print("групп дубликатов:", len(library_stats.find_duplicates(lib.items)))
 w.go("albums"); dump("lib_albums.jpg")
 w.go("artists")
 for _ in range(80):                                   # фото исполнителей грузятся из интернета

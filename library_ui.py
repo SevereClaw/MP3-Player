@@ -1847,6 +1847,8 @@ class SettingsPage(QWidget):
                     "Страницы выезжают скошенной полосой, как меню P3R")
         self.toggle("Звуки меню", lambda: cfg("ui_sounds", True), lambda: self.flip("ui_sounds", True),
                     "Курсор, выбор и «назад» — громкость как у звуков кнопок")
+        self.actions("Дубликаты", [("🔍 НАЙТИ ДУБЛИКАТЫ", lambda: self.win.go("dups"))],
+                     "Одна и та же песня в разных папках или форматах — оставить лучшую копию")
         self.actions("Папки с музыкой", [("+ ДОБАВИТЬ ПАПКУ", self.add_folder),
                                          ("⟳ ПЕРЕСКАНИРОВАТЬ", lambda: o.scan_library(force=True))],
                      "Отсюда медиатека берёт альбомы и исполнителей")
@@ -2121,7 +2123,8 @@ class LibraryWindow(QWidget):
         sl.addSpacing(14)
         self.nav = {}
         for key, text in (("home", "ГЛАВНАЯ"), ("albums", "АЛЬБОМЫ"), ("artists", "ИСПОЛНИТЕЛИ"),
-                          ("tracks", "ВСЕ ТРЕКИ"), ("now", "СЕЙЧАС ИГРАЕТ"), ("settings", "НАСТРОЙКИ")):
+                          ("tracks", "ВСЕ ТРЕКИ"), ("now", "СЕЙЧАС ИГРАЕТ"), ("stats", "ИТОГИ"),
+                          ("settings", "НАСТРОЙКИ")):
             b = NavButton(text)
             b.setFixedHeight(42)
             b.clicked.connect(lambda _=False, k=key: self.go(k))
@@ -2207,9 +2210,13 @@ class LibraryWindow(QWidget):
         self.now = NowPlaying(self)
         self.settings = SettingsPage(self)
         self.home = self.more.HomePage(self)
+        import library_stats
+        self.stats_page = library_stats.StatsPage(self)
+        self.dups = library_stats.DuplicatesPage(self)
         for key, w, title in (("home", self.home, None), ("albums", self.albums_view, "АЛЬБОМЫ"), ("artists", self.artists_view, "ИСПОЛНИТЕЛИ"),
                               ("tracks", self.tracks_box, "ВСЕ ТРЕКИ"), ("detail", self.detail, None),
-                              ("now", self.now, None), ("settings", self.settings, None)):
+                              ("now", self.now, None), ("stats", self.stats_page, None), ("dups", self.dups, None),
+                              ("settings", self.settings, None)):
             page = w
             if title:
                 page = QWidget()
@@ -2252,7 +2259,7 @@ class LibraryWindow(QWidget):
         for b in self.nav.values():
             b.nav_win = self
         from PySide6.QtGui import QShortcut, QKeySequence
-        for i, key in enumerate(("home", "albums", "artists", "tracks", "now", "settings"), 1):
+        for i, key in enumerate(("home", "albums", "artists", "tracks", "now", "stats", "settings"), 1):
             QShortcut(QKeySequence(f"Ctrl+{i}"), self, activated=lambda k=key: (sfx("select"), self.go(k)))
         QShortcut(QKeySequence("Alt+Left"), self, activated=self.go_back)
         QShortcut(QKeySequence("Ctrl+L"), self, activated=lambda: self.toggle_queue())
@@ -2269,6 +2276,8 @@ class LibraryWindow(QWidget):
             #h1 {{ font-size:34px; font-weight:900; font-style:italic; color:{w}; }}
             #sec {{ font-size:20px; font-weight:900; font-style:italic; color:{c}; letter-spacing:1px; }}
             #h2 {{ font-size:26px; font-weight:900; font-style:italic; color:{w}; }}
+            #dupbest {{ font-size:13px; font-weight:900; font-style:italic; color:{c}; }}
+            #dupext {{ font-size:13px; font-weight:bold; font-style:italic; color:{d}; }}
             #qnow {{ font-size:13px; font-weight:bold; font-style:italic; color:{c}; padding:4px 0; }}
             #hero {{ background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 rgba(47,211,255,40),
                      stop:0.5 rgba(11,34,87,160), stop:1 rgba(3,10,31,200)); border:2px solid {c}; }}
