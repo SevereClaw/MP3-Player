@@ -177,6 +177,11 @@ w.set_filter("fav"); __import__("time").sleep(0.5); dump("lib_tracks_fav.jpg")
 w.set_filter("all")
 w.focus_sidebar(); w.focus_nav_step(w.nav["tracks"], 1); __import__("time").sleep(0.5); dump("lib_keyboard.jpg")
 w.go("stats"); __import__("time").sleep(0.3); dump("lib_stats.jpg")
+for _cat in ("repeat", "albums", "artists", "tracks"):          # категории итогов
+    w.stats_page.set_cat(_cat)
+    w.stats_page.sc.verticalScrollBar().setValue(330)
+    dump(f"lib_stats_{_cat}.jpg")
+w.stats_page.sc.verticalScrollBar().setValue(0)
 import datetime as _dd
 _today = _dd.date.today()
 w.stats_page.set_period("all"); dump("lib_stats_all.jpg")

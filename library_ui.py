@@ -1928,6 +1928,9 @@ class SettingsPage(QWidget):
         self.toggle("Обложки и фото исполнителей из интернета", lambda: cfg("online_art", True),
                     lambda: self.flip("online_art", True, after=self.win.covers.forget_missing),
                     "Для треков без своей картинки — с iTunes и Deezer")
+        self.toggle("Искать неизвестных исполнителей в интернете", lambda: cfg("online_artist", True),
+                    lambda: self.flip("online_artist", True, after=getattr(o, "find_unknown_artists", None)),
+                    "Трек без исполнителя — плеер сам найдёт, кто это. Не тот — ПКМ по треку → «Не тот исполнитель»")
         self.toggle("Анимация переходов", lambda: cfg("ui_anim", True), lambda: self.flip("ui_anim", True),
                     "Страницы выезжают скошенной полосой, как меню P3R")
         self.toggle("Звуки меню", lambda: cfg("ui_sounds", True), lambda: self.flip("ui_sounds", True),
@@ -2178,6 +2181,7 @@ class LibraryWindow(QWidget):
         self.albums, self.artists = [], []
         self.history = []
         self._built_n = -1
+        self._auto_v = self.lib.auto_version
         self._detail_obj = None
         import library_more as more
         self.more = more
@@ -2412,6 +2416,7 @@ class LibraryWindow(QWidget):
             return
         self.items = items
         self._built_n = len(items)
+        self._auto_v = self.lib.auto_version
         self.albums = libmod.build_albums(items)
         self.artists = libmod.build_artists(items, self.albums)
         self.albums_view.model_.set_rows(self.albums)
@@ -2906,6 +2911,12 @@ class LibraryWindow(QWidget):
         ar = next((a for a in self.artists if a["name"] == ar_name), None)
         if ar:
             m.addAction(f"🎤  {ar['name']}", lambda: self.open_artist(ar))
+        autos = [p for p in group if self.lib.auto_artist(p)]
+        if autos:                                           # исполнитель подставлен из интернета
+            m.addAction("✖  Не тот исполнитель — убрать" + (f" ({len(autos)})" if len(autos) > 1 else ""),
+                        lambda: [self.lib.reject_artist(p) for p in autos])
+            if len(group) == 1:
+                m.addAction("✎  Не тот исполнитель — вписать своего…", lambda: self.owner.edit_tags(path))
         m.addAction("📂  Показать в папке", lambda: __import__("subprocess").Popen(["explorer", "/select,", path]))
         m.exec(view.viewport().mapToGlobal(pt))
 
@@ -2930,11 +2941,13 @@ class LibraryWindow(QWidget):
             self._last_path = lp
             self.tracks_view.viewport().update()
             self.detail.tracks.viewport().update()
-        st = "сканирую папки…" if self.lib.scanning else ""
+        st = "сканирую папки…" if self.lib.scanning else ("ищу исполнителей…" if self.lib.finding else "")
         if st != self.scan_lbl.text():
             self.scan_lbl.setText(st)
         if not self.lib.scanning and len(self.lib) != self._built_n:
             self.rebuild()
+        if self.lib.auto_version != self._auto_v:           # нашлись исполнители в интернете
+            self.rebuild(force=True)
 
     def open(self):
         self.rebuild()

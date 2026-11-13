@@ -208,6 +208,17 @@ def _entry(p, size, mtime):
             "n": t["track"], "d": round(t["length"], 1)}
 
 
+AUTO_RETRY = 30 * 86400            # не нашёлся исполнитель — снова искать через месяц
+
+
+def _keep_auto(new, old):
+    """Файл перечитали — не терять исполнителя, найденного в интернете (и отказ от него)."""
+    for k in ("ag", "agt", "agx"):
+        if old and k in old and k not in new:
+            new[k] = old[k]
+    return new
+
+
 # ------------------------------------------------------------------ альбомы и исполнители
 UNKNOWN_ARTIST = "Неизвестный исполнитель"
 VARIOUS = "Разные исполнители"
@@ -217,7 +228,7 @@ def track_view(path, it):
     """Что показывать для трека: название, исполнитель, альбом (пустые теги — из имени файла и папки)."""
     ga, gt = guess_from_name(path)
     title = it.get("t") or gt
-    artist = it.get("a") or ga or UNKNOWN_ARTIST
+    artist = it.get("a") or ga or it.get("ag") or UNKNOWN_ARTIST      # "ag" — найден в интернете
     album = it.get("al") or os.path.basename(os.path.dirname(path)) or "Без альбома"
     return title, artist, album
 
@@ -284,6 +295,8 @@ class Library:
         self.lock = threading.Lock()
         self.scanning = False
         self.scanned_at = 0.0
+        self.finding = False            # идёт поиск неизвестных исполнителей в интернете
+        self.auto_version = 0           # растёт, когда найденные исполнители поменялись
         self._hay = {}                  # путь → строка для поиска
         try:
             with open(cache_path, "r", encoding="utf-8") as f:
@@ -297,7 +310,8 @@ class Library:
         for p, it in self.items.items():
             folder = os.path.basename(os.path.dirname(p))
             stem = os.path.splitext(os.path.basename(p))[0]
-            hay[p] = " " + norm(" ".join((it.get("t", ""), it.get("a", ""), it.get("al", ""), stem, folder)))
+            hay[p] = " " + norm(" ".join((it.get("t", ""), it.get("a", "") or it.get("ag", ""), it.get("al", ""),
+                                          stem, folder)))
         self._hay = hay
 
     def save(self):
@@ -342,8 +356,12 @@ class Library:
                     if it and it.get("s") == size and it.get("m") == mtime and "d" in it:
                         fresh[p] = it
                         continue
-                    fresh[p] = _entry(p, size, mtime)
+                    fresh[p] = _keep_auto(_entry(p, size, mtime), it)
                 with self.lock:
+                    for p, it in fresh.items():             # что нашлось в интернете, пока шёл скан
+                        cur = self.items.get(p)
+                        if cur is not None and cur is not it:
+                            _keep_auto(it, cur)
                     self.items = fresh
                     self._rebuild_hay()
                 self.scanned_at = time.time()
@@ -363,8 +381,89 @@ class Library:
         except OSError:
             return
         with self.lock:
-            self.items[p] = _entry(p, st.st_size, int(st.st_mtime))
+            self.items[p] = _keep_auto(_entry(p, st.st_size, int(st.st_mtime)), self.items.get(p))
             self._rebuild_hay()
+        self.save()
+
+    # ------------------------------------------------------------ неизвестные исполнители
+    def auto_artist(self, path):
+        """Исполнитель, найденный в интернете (если именно он сейчас показывается), иначе ''."""
+        p = os.path.normpath(path)
+        it = self.items.get(p) or {}
+        return "" if it.get("a") or guess_from_name(p)[0] else it.get("ag", "")
+
+    def reject_artist(self, path):
+        """«Не тот исполнитель»: убрать найденное и больше для этого трека не искать."""
+        p = os.path.normpath(path)
+        with self.lock:
+            it = self.items.get(p)
+            if it is None:
+                return
+            it.pop("ag", None)
+            it["agx"] = 1
+            self._rebuild_hay()
+            self.auto_version += 1
+        self.save()
+
+    def unknown_paths(self, now=None):
+        """Треки без исполнителя (ни в тегах, ни в имени файла), для которых ещё стоит поискать."""
+        now = now or time.time()
+        with self.lock:
+            return [p for p, it in self.items.items()
+                    if not it.get("a") and not it.get("ag") and not it.get("agx")
+                    and now - (it.get("agt") or 0) > AUTO_RETRY and not guess_from_name(p)[0]]
+
+    def find_artists(self, lookup=None, enabled=lambda: True, done=None):
+        """В фоне найти в интернете исполнителей для треков без исполнителя.
+        lookup(название, длительность, альбом, имя файла) → имя | None; Offline — нет сети."""
+        if self.finding:
+            return
+        todo = self.unknown_paths()
+        if not todo:
+            return
+        self.finding = True
+
+        def work():
+            import online_art as oa
+            fn = lookup or oa.find_artist
+            found, last_save = 0, time.time()
+            try:
+                for p in todo:
+                    if not enabled():
+                        break
+                    it = self.items.get(p)
+                    if it is None or it.get("a") or it.get("ag") or it.get("agx"):
+                        continue
+                    stem = os.path.splitext(os.path.basename(p))[0]
+                    try:
+                        name = fn(it.get("t") or guess_from_name(p)[1], it.get("d") or 0, it.get("al") or "", stem)
+                    except oa.Offline:
+                        break                                # нет сети — в следующий раз
+                    except Exception:
+                        name = None
+                    with self.lock:
+                        it = self.items.get(p)
+                        if it is None:
+                            continue
+                        it["agt"] = int(time.time())
+                        if name and not it.get("agx"):
+                            it["ag"] = str(name).strip()
+                            found += 1
+                    if found and time.time() - last_save > 10:       # показывать по мере того, как находятся
+                        last_save = time.time()
+                        self._auto_changed()
+            finally:
+                self._auto_changed()
+                self.finding = False
+                if done:
+                    done()
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _auto_changed(self):
+        with self.lock:
+            self._rebuild_hay()
+            self.auto_version += 1
         self.save()
 
     def __len__(self):

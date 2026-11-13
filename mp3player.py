@@ -2200,6 +2200,12 @@ class Mp3Widget(QWidget):
     def on_library_scanned(self):
         if self.search_panel.isVisible():
             self.search_panel.run()
+        self.find_unknown_artists()
+
+    def find_unknown_artists(self):
+        """Треки без исполнителя — поискать, кто это, в интернете (в фоне)."""
+        if self.cfg.get("online_artist", True):
+            self.library.find_artists(enabled=lambda: self.cfg.get("online_artist", True))
 
     def open_search(self):
         if self.search_panel.isVisible():
@@ -2422,7 +2428,13 @@ class Mp3Widget(QWidget):
         if not path or not os.path.isfile(path):
             self.flash("НЕТ ТРЕКА")
             return
-        self.tag_editor.open_for(path, libmod.read_tags(path), self.visual_rect(), libmod.can_write(path))
+        tags = libmod.read_tags(path)
+        auto = self.library.auto_artist(path) if not tags.get("artist") else ""
+        if auto:
+            tags["artist"] = auto
+        self.tag_editor.open_for(path, tags, self.visual_rect(), libmod.can_write(path))
+        if auto and libmod.can_write(path):
+            self.tag_editor.note.setText("Исполнитель найден в интернете. Не тот — исправь или сотри и нажми «Сохранить».")
 
     def save_tags(self, path, d):
         """Записать теги. Если трек сейчас играет — отпустить файл, записать и продолжить с того же места."""
@@ -2450,6 +2462,8 @@ class Mp3Widget(QWidget):
                 finish(False)
                 return
             self.library.update(path)
+            if not (d.get("artist") or "").strip():          # стёр исполнителя сам — больше не подставлять из интернета
+                self.library.reject_artist(path)
             self.tag_editor.hide()
             self.flash("✎ ТЕГИ СОХРАНЕНЫ", 2.0)
             if self.search_panel.isVisible():

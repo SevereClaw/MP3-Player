@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-"""Обложки альбомов и фото исполнителей из интернета — для музыки, у которой своих картинок нет.
+"""Обложки альбомов, фото исполнителей и имена неизвестных исполнителей из интернета —
+для музыки, у которой своих картинок или тегов нет.
 
 Источники без ключей и регистрации: iTunes Search (обложки) и Deezer (обложки и фото
 исполнителей). Совпадение проверяется по названию, чтобы не подставить чужую картинку.
@@ -140,3 +141,69 @@ def artist_photo_url(name):
         u = r.get("picture_xl") or r.get("picture_big") or ""
         return u if u and "/artist//" not in u else None          # пустая картинка-заглушка Deezer
     return _try([lambda: _deezer("/artist", name, ok, pick)])
+
+
+# ------------------------------------------------------------------ кто это поёт
+def _same_title(a, b):
+    """Названия треков совпадают (строже, чем similar: «Love» ≠ «Lovely Day»)."""
+    a, b = norm(a), norm(b)
+    if not a or not b:
+        return False
+    ca, cb = a.replace(" ", ""), b.replace(" ", "")
+    if ca == cb:
+        return True
+    short, long_ = sorted((ca, cb), key=len)
+    return len(short) >= 4 and short in long_ and len(short) / len(long_) >= 0.6
+
+
+def _in_name(name, title, artist):
+    """В имени файла есть и название, и исполнитель: «kino_gruppa-krovi», «Группа крови (Кино)»."""
+    n, t, a = (norm(x).replace(" ", "") for x in (name, title, artist))
+    return len(t) >= 3 and len(a) >= 3 and t in n and a in n and len(t) + len(a) >= len(n) * 0.6
+
+
+def find_artist(title, duration=0.0, album="", name=""):
+    """Имя исполнителя для трека без тега «исполнитель» или None. Нет сети — Offline.
+
+    Чтобы не приписать песню однофамильцу, одного названия мало — должно совпасть ещё что-то:
+    длительность (±3 с), альбом из тегов или имя исполнителя в имени файла."""
+    title = (title or "").strip()
+    if len(norm(title)) < 2:
+        return None
+
+    def ok(r_title, r_artist, r_dur, r_album):
+        if not r_artist:
+            return False
+        if name and _in_name(name, r_title, r_artist):
+            return True
+        if not _same_title(r_title, title):
+            return False
+        if duration and r_dur and abs(float(r_dur) - duration) <= 3.0:
+            return True
+        return bool(album) and similar(r_album, album)
+
+    def deezer(q):
+        d = _get_json("https://api.deezer.com/search?" + urllib.parse.urlencode({"q": q, "limit": 25}))
+        for r in d.get("data", []):
+            a = (r.get("artist") or {}).get("name")
+            if ok(r.get("title"), a, r.get("duration"), (r.get("album") or {}).get("title")):
+                return a
+        return None
+
+    def itunes(country):
+        q = {"term": f"{title} {album}".strip(), "entity": "song", "limit": 25, "country": country}
+        if country == "JP":
+            q["lang"] = "ja_jp"
+        d = _get_json("https://itunes.apple.com/search?" + urllib.parse.urlencode(q))
+        for r in d.get("results", []):
+            if ok(r.get("trackName"), r.get("artistName"), (r.get("trackTimeMillis") or 0) / 1000.0,
+                  r.get("collectionName")):
+                return r.get("artistName")
+        return None
+
+    srcs = [lambda: deezer(f'track:"{title}"' + (f' album:"{album}"' if album else "")),
+            lambda: deezer(title),
+            lambda: itunes("US")]
+    if _cjk(title):
+        srcs.insert(2, lambda: itunes("JP"))
+    return _try(srcs)

@@ -24,6 +24,13 @@ def human_time(sec):
     return f"{m} мин" if m else f"{sec} с"
 
 
+def plays_word(n):
+    n = int(n or 0)
+    if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
+        return f"{n} раза"
+    return f"{n} раз"
+
+
 def _scroll():
     sc = QScrollArea()
     sc.setWidgetResizable(True)
@@ -127,7 +134,7 @@ class DayChart(QWidget):
 
 
 class RankList(QWidget):
-    """Топ исполнителей / треков: место, картинка, имя и полоса «сколько времени»."""
+    """Топ треков / альбомов / исполнителей: место, картинка, имя и полоса «сколько времени» (или «сколько раз»)."""
     clicked = Signal(object)
 
     ROW = 50
@@ -136,7 +143,7 @@ class RankList(QWidget):
         super().__init__()
         self.win = win
         self.round_art = round_art
-        self.rows = []                 # [{"title","sub","sec","plays","cover_path","artist","path"}]
+        self.rows = []                 # [{"title","sub","sec","cover_path","artist","path"; "val","val_text" — своя шкала}]
         self.setMouseTracking(True)
         self.hover = -1
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -173,7 +180,7 @@ class RankList(QWidget):
             p.setPen(DIM)
             p.drawText(self.rect(), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "  пока пусто")
             return
-        mx = max(r["sec"] for r in self.rows) or 1
+        mx = max(r.get("val", r["sec"]) for r in self.rows) or 1
         w = self.width()
         for i, r in enumerate(self.rows):
             y = i * self.ROW
@@ -205,7 +212,7 @@ class RankList(QWidget):
                        fm.elidedText(r.get("sub", ""), Qt.TextElideMode.ElideRight, int(tw)))
             bx = x + tw + 12
             bw = max(10.0, w - bx - 120)
-            bar = QRectF(bx, y + self.ROW / 2 - 7, bw * r["sec"] / mx, 14)
+            bar = QRectF(bx, y + self.ROW / 2 - 7, bw * r.get("val", r["sec"]) / mx, 14)
             g = QLinearGradient(bar.topLeft(), bar.topRight())
             g.setColorAt(0, WHITE)
             g.setColorAt(1, CYAN)
@@ -216,7 +223,7 @@ class RankList(QWidget):
             p.setFont(pfont(13))
             p.setPen(ICE)
             p.drawText(QRectF(w - 116, y, 108, self.ROW), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                       human_time(r["sec"]))
+                       r.get("val_text") or human_time(r["sec"]))
         p.end()
 
 
@@ -272,6 +279,11 @@ def _month_end(d):
 class StatsPage(QWidget):
     """Итоги: всё время → год → месяц → неделя → день (клик по столбику — глубже, «крошки» сверху — назад)."""
     PERIODS = (("week", "НЕДЕЛЯ"), ("month", "МЕСЯЦ"), ("year", "ГОД"), ("all", "ВСЁ ВРЕМЯ"))
+    # категории итогов: ключ, кнопка, заголовок списка
+    CATS = (("tracks", "ПОПУЛЯРНОЕ", "ПОПУЛЯРНАЯ МУЗЫКА · что слушал дольше всего"),
+            ("repeat", "НА ПОВТОРЕ", "НА ПОВТОРЕ · что включал чаще всего"),
+            ("albums", "АЛЬБОМЫ", "ТОП АЛЬБОМОВ"),
+            ("artists", "ИСПОЛНИТЕЛИ", "ТОП ИСПОЛНИТЕЛЕЙ"))
 
     def __init__(self, win):
         super().__init__()
@@ -308,9 +320,9 @@ class StatsPage(QWidget):
         cards.setSpacing(6)
         self.c_time = StatCard("СЛУШАЛ")
         self.c_tracks = StatCard("ТРЕКОВ")
-        self.c_artists = StatCard("ИСПОЛНИТЕЛЕЙ")
+        self.c_hit = StatCard("ГЛАВНЫЙ ТРЕК")
         self.c_best = StatCard("САМЫЙ МУЗЫКАЛЬНЫЙ")
-        for c in (self.c_time, self.c_tracks, self.c_artists, self.c_best):
+        for c in (self.c_time, self.c_tracks, self.c_hit, self.c_best):
             cards.addWidget(c)
         lay.addLayout(cards)
 
@@ -324,14 +336,22 @@ class StatsPage(QWidget):
         self.chart = DayChart()
         self.chart.picked.connect(self._drill)
         lay.addWidget(self.chart)
-        sec("ТОП ИСПОЛНИТЕЛЕЙ")
-        self.artists = RankList(win, round_art=True)
-        self.artists.clicked.connect(self._open_artist)
-        lay.addWidget(self.artists)
-        self.tracks_title = sec("ТОП ТРЕКОВ")
-        self.tracks = RankList(win)
-        self.tracks.clicked.connect(lambda r: r.get("path") and self.win.play_paths(
-            [x["path"] for x in self.tracks.rows if x.get("path")], r["path"]))
+        lay.addSpacing(8)
+        cats = QHBoxLayout()
+        cats.setSpacing(4)
+        self.cat_chips = {}
+        for key, name, _full in self.CATS:
+            c = P3Chip(name)
+            c.clicked.connect(lambda _=False, k=key: self.set_cat(k))
+            cats.addWidget(c)
+            self.cat_chips[key] = c
+        cats.addStretch(1)
+        lay.addLayout(cats)
+        self.tracks_title = QLabel("")
+        self.tracks_title.setObjectName("sec")
+        lay.addWidget(self.tracks_title)
+        self.tracks = RankList(win)                         # один список — что в нём, решает категория
+        self.tracks.clicked.connect(self._row_clicked)
         lay.addWidget(self.tracks)
         row = QHBoxLayout()
         b = P3Action("📊 ИТОГИ НЕДЕЛИ В DISCORD…")
@@ -357,6 +377,27 @@ class StatsPage(QWidget):
         else:
             self.level, self.anchor = "all", None
         self.refresh()
+
+    def set_cat(self, key):
+        self.o.cfg["stats_cat"] = key
+        getattr(self.o, "save_later", lambda: None)()
+        self.refresh()
+
+    def _cat(self):
+        c = self.o.cfg.get("stats_cat", "tracks")
+        return c if c in self.cat_chips else "tracks"
+
+    def _row_clicked(self, r):
+        kind = r.get("kind")
+        if kind == "artist":
+            self._open_artist(r)
+        elif kind == "album":
+            if r.get("album") is not None:
+                self.win.open_album(r["album"])
+            elif r.get("paths"):
+                self.win.play_paths(r["paths"], r["paths"][0])
+        elif r.get("path"):
+            self.win.play_paths([x["path"] for x in self.tracks.rows if x.get("path")], r["path"])
 
     def _go(self, level, anchor):
         self.level, self.anchor = level, anchor
@@ -525,29 +566,67 @@ class StatsPage(QWidget):
             v["tracks"].append((sc, path))
         self.c_time.set(human_time(total), f"в среднем {human_time(total / max(1, span))} в день" if span > 1 else "за этот день")
         self.c_tracks.set(str(len(per)), f"{sum(v[1] for v in per.values())} прослушиваний")
-        self.c_artists.set(str(len(arts)), "разных")
+        hit = max(per.items(), key=lambda kv: kv[1][0], default=None)
+        if hit:
+            ht = tracks.get(hit[0]) or {}
+            who = (ht.get("artist") or "радио") if hit[0].startswith("radio:") else self._artist_of(hit[0], ht)
+            self.c_hit.set(self._title_of(hit[0], ht), f"{who} · {human_time(hit[1][0])}")
+        else:
+            self.c_hit.set("—", "")
         best = max(items, key=lambda x: x["sec"]) if items else None
         if best and best["sec"] > 0:
             self.c_best.set(best["label"], human_time(best["sec"]))
         else:
             self.c_best.set("—", "")
+        cat = self._cat()
+        for k, c in self.cat_chips.items():
+            c.setChecked(k == cat)
+        day = self.level == "day"
+        self.tracks.round_art = cat == "artists"
         rows = []
-        for a, v in sorted(arts.items(), key=lambda kv: -kv[1]["sec"])[:10]:
-            v["tracks"].sort(reverse=True)
-            names = [self._title_of(p, tracks.get(p) or {}) for _s, p in v["tracks"][:3]]
-            rows.append({"title": a, "artist": a, "sec": v["sec"], "cover_path": v["tracks"][0][1],
-                         "sub": f"{v['plays']} раз · чаще всего: " + ", ".join(names),
-                         "paths": [p for _s, p in v["tracks"]]})
-        self.artists.set_rows(rows)
-        self.tracks_title.setText("ЧТО СЛУШАЛ В ЭТОТ ДЕНЬ" if self.level == "day" else "ТОП ТРЕКОВ")
-        trows = []
-        for path, (sc, pl) in sorted(per.items(), key=lambda kv: -kv[1][0])[:(30 if self.level == "day" else 15)]:
-            t = tracks.get(path) or {}
-            artist = self._artist_of(path, t) if not path.startswith("radio:") else (t.get("artist") or "радио")
-            trows.append({"title": self._title_of(path, t), "sub": f"{artist} · {pl} раз", "sec": sc,
-                          "cover_path": None if path.startswith("radio:") else path,
-                          "path": path if os.path.isfile(path) else None})
-        self.tracks.set_rows(trows)
+        if cat == "artists":
+            for a, v in sorted(arts.items(), key=lambda kv: -kv[1]["sec"])[:15]:
+                v["tracks"].sort(reverse=True)
+                names = [self._title_of(p, tracks.get(p) or {}) for _s, p in v["tracks"][:3]]
+                rows.append({"kind": "artist", "title": a, "artist": a, "sec": v["sec"], "cover_path": v["tracks"][0][1],
+                             "sub": f"{plays_word(v['plays'])} · чаще всего: " + ", ".join(names),
+                             "paths": [p for _s, p in v["tracks"]]})
+        elif cat == "albums":
+            by_path = {p: al for al in self.win.albums for p in al["tracks"]}
+            albs = {}
+            for path, (sc, pl) in per.items():
+                al = by_path.get(path)
+                if al is None:                              # радио и то, чего уже нет в медиатеке
+                    continue
+                v = albs.setdefault(al["key"], {"al": al, "sec": 0.0, "plays": 0, "tracks": []})
+                v["sec"] += sc
+                v["plays"] += pl
+                v["tracks"].append((sc, path))
+            for v in sorted(albs.values(), key=lambda v: -v["sec"])[:15]:
+                v["tracks"].sort(reverse=True)
+                al = v["al"]
+                rows.append({"kind": "album", "title": al["title"], "sec": v["sec"], "cover_path": al["cover_path"],
+                             "sub": f"{al['artist']} · {len(v['tracks'])} из {len(al['tracks'])} трек. · "
+                                    f"{plays_word(v['plays'])}",
+                             "album": al, "paths": [p for _s, p in v["tracks"] if os.path.isfile(p)]})
+        else:
+            by_plays = cat == "repeat"
+            order = sorted(per.items(), key=(lambda kv: (-kv[1][1], -kv[1][0])) if by_plays else (lambda kv: -kv[1][0]))
+            for path, (sc, pl) in order[:(30 if day else 20)]:
+                if by_plays and pl <= 0:
+                    continue
+                t = tracks.get(path) or {}
+                artist = self._artist_of(path, t) if not path.startswith("radio:") else (t.get("artist") or "радио")
+                row = {"kind": "track", "title": self._title_of(path, t), "sec": sc,
+                       "sub": f"{artist} · {human_time(sc) if by_plays else plays_word(pl)}",
+                       "cover_path": None if path.startswith("radio:") else path,
+                       "path": path if os.path.isfile(path) else None}
+                if by_plays:
+                    row["val"], row["val_text"] = pl, plays_word(pl)
+                rows.append(row)
+        full = next(f for k, _n, f in self.CATS if k == cat)
+        self.tracks_title.setText("ЧТО СЛУШАЛ В ЭТОТ ДЕНЬ" if day and cat == "tracks" else full)
+        self.tracks.set_rows(rows)
 
     def _is_current(self):
         today = _dt.date.today()
