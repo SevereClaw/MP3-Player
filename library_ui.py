@@ -167,6 +167,24 @@ def paint_bg(p: QPainter, r: QRect, t=0.0):
     p.restore()
 
 
+_BG = {}
+
+
+def bg_pixmap(w, h):
+    """Тот же фон, но нарисованный один раз: градиент на всё окно в каждом кадре — это и грело процессор."""
+    pm = _BG.get((w, h))
+    if pm is None:
+        if len(_BG) > 3:
+            _BG.clear()
+        pm = QPixmap(max(1, w), max(1, h))
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        paint_bg(p, QRect(0, 0, w, h))
+        p.end()
+        _BG[(w, h)] = pm
+    return pm
+
+
 def placeholder(size, seed=""):
     """Обложки нет — синяя плашка с нотой."""
     pm = QPixmap(size, size)
@@ -1127,6 +1145,10 @@ class WavePanel(QWidget):
             liked = False
         self.fav_btn.setText("♥  В ИЗБРАННОМ" if liked else "♡  НРАВИТСЯ")
 
+    def animate(self):
+        """Следующий кадр волн: перерисовать только полосу с волнами, а не всю панель с кнопками."""
+        self.update(0, 62 - 46, self.width(), 92)
+
     def paintEvent(self, _e):
         now = time.monotonic()
         dt = max(0.0, min(0.05, now - self._last))
@@ -1147,21 +1169,24 @@ class WavePanel(QWidget):
         mid = r.top() + 62
         for i, (col, a, k, sp, wdt) in enumerate(((CYAN, 16, 0.016, 1.0, 3.0), (WHITE, 11, 0.022, -1.3, 2.0),
                                                    (CYAN_D, 20, 0.011, 0.7, 2.0))):
-            path = QPainterPath()
+            pts = []
             amp = a * self.amp
-            for x in range(0, int(r.width()) + 1, 6):
+            for x in range(0, int(r.width()) + 10, 10):
                 env = math.sin(math.pi * x / max(1.0, r.width()))         # к краям волна затихает
-                y = mid + math.sin(x * k + self.t * 2.4 * sp + i) * amp * env \
-                    + math.sin(x * k * 2.3 - self.t * 1.7 * sp) * amp * 0.35 * env
-                if x == 0:
-                    path.moveTo(x, y)
-                else:
-                    path.lineTo(x, y)
+                pts.append(QPointF(x, mid + math.sin(x * k + self.t * 2.4 * sp + i) * amp * env
+                                   + math.sin(x * k * 2.3 - self.t * 1.7 * sp) * amp * 0.35 * env))
             c = QColor(col)
             c.setAlpha(230 if i == 0 else 140)
-            p.setPen(QPen(c, wdt))
+            # толстая сглаженная линия рисуется раз в двадцать дольше тонкой — кладём несколько тонких рядом
+            n_l = int(wdt)
+            c.setAlpha(int(c.alpha() * (0.8 if n_l > 1 else 1.0)))
+            p.setPen(QPen(c, 1.0))
             p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawPath(path)
+            for j in range(n_l):
+                off = j - (n_l - 1) / 2.0
+                p.translate(0, off)
+                p.drawPolyline(pts)
+                p.translate(0, -off)
         # заголовок поверх волн
         p.setFont(pfont(30))
         p.setPen(WHITE)
@@ -1183,6 +1208,9 @@ class NowPlaying(QWidget):
         self.win = win
         self._blur_key = None
         self._blur = None
+        self._back_key = None
+        self._back = None
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)     # сама закрашивает всё — окно под ней не рисуем
         self.setMouseTracking(True)
         # анимация: обложка «парит» под мышкой, текст плавно едет и перетекает
         self.mouse = None
@@ -1200,6 +1228,7 @@ class NowPlaying(QWidget):
         self.vol_v = None               # показанное значение (плавно догоняет настоящее)
         self.vol_kick = 0.0             # толчок при каждом щелчке колеса (+ громче, − тише)
         self._wheel_acc = 0.0
+        self._mouse_t = 0.0             # когда последний раз двигали мышью над страницей
         self._glide_until = 0.0         # после клика по строке текст плавно доезжает, а не прыгает
         self._pulse = (-1, 0.0)         # (строка, когда кликнули) — вспышка на выбранной строке
         self.wave = WavePanel(win)
@@ -1211,6 +1240,7 @@ class NowPlaying(QWidget):
 
     def mouseMoveEvent(self, e):
         self.mouse = e.position()
+        self._mouse_t = time.monotonic()
         on = self._line_at(self.mouse) is not None
         self.setCursor(Qt.CursorShape.PointingHandCursor if on else Qt.CursorShape.ArrowCursor)
 
@@ -1358,23 +1388,35 @@ class NowPlaying(QWidget):
                                                             Qt.TransformationMode.SmoothTransformation))
         return self._blur
 
+    def _backdrop(self, img):
+        """Фон страницы целиком (градиент + размытая обложка + затемнение) — собирается один раз на трек."""
+        r = self.rect()
+        key = (img.cacheKey() if img is not None else 0, r.width(), r.height())
+        if key != self._back_key or self._back is None:
+            self._back_key = key
+            pm = QPixmap(bg_pixmap(r.width(), r.height()))
+            bl = self._blurred(img)
+            if bl is not None:
+                p = QPainter(pm)
+                p.setOpacity(0.35)
+                p.drawPixmap(0, (r.height() - bl.height()) // 2, bl)
+                p.setOpacity(1.0)
+                veil = QLinearGradient(QPointF(r.topLeft()), QPointF(r.topRight()))
+                veil.setColorAt(0, QColor(6, 19, 49, 120))
+                veil.setColorAt(1, QColor(3, 10, 31, 235))
+                p.fillRect(r, veil)
+                p.end()
+            self._back = pm
+        return self._back
+
     def paintEvent(self, _e):
         o = self.win.owner
         p = QPainter(self)
+        r = self.rect()
+        img = self._cover_img()
+        p.drawPixmap(0, 0, self._backdrop(img))
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        r = self.rect()
-        paint_bg(p, r)
-        img = self._cover_img()
-        bl = self._blurred(img)
-        if bl is not None:
-            p.setOpacity(0.35)
-            p.drawPixmap(0, (r.height() - bl.height()) // 2, bl)
-            p.setOpacity(1.0)
-            veil = QLinearGradient(QPointF(r.topLeft()), QPointF(r.topRight()))
-            veil.setColorAt(0, QColor(6, 19, 49, 120))
-            veil.setColorAt(1, QColor(3, 10, 31, 235))
-            p.fillRect(r, veil)
 
         # ---- время кадра
         now = time.monotonic()
@@ -2609,9 +2651,9 @@ class LibraryWindow(QWidget):
             QMenu::item:selected {{ background:{c}; color:{NAVY.name()}; }}
         """)
 
-    def paintEvent(self, _e):
+    def paintEvent(self, e):
         p = QPainter(self)
-        paint_bg(p, self.rect())
+        p.drawPixmap(e.rect(), bg_pixmap(self.width(), self.height()), e.rect())      # только то, что просили
         p.end()
 
     # ------------------------------------------------------------ данные
@@ -2723,7 +2765,7 @@ class LibraryWindow(QWidget):
             self.trans.start(old_pm, self._snap(new), back=back)
         for k, b in self.nav.items():
             b.setChecked(k == key)
-        self.timer.setInterval(16 if key in ("now", "home") else 250)      # волны и «Сейчас играет» — 60 кадров
+        self._pace()
         if hasattr(self, "pl_btns"):
             self._mark_playlist()
 
@@ -2935,7 +2977,7 @@ class LibraryWindow(QWidget):
         import online_art as oa
         it = self.lib.items.get(path) or {}
         ga, gt = libmod.guess_from_name(path)
-        artist, album, title = it.get("a") or ga or it.get("ag", ""), it.get("al") or "", it.get("t") or gt
+        artist, album, title = libmod.tag_artist(it) or ga or it.get("ag", ""), it.get("al") or "", it.get("t") or gt
         if album:
             key = ("al", libmod.norm(artist), libmod.norm(album))
             return self._online_cached(key, lambda: oa.album_cover_url(artist, album))
@@ -3136,19 +3178,45 @@ class LibraryWindow(QWidget):
         m.exec(view.viewport().mapToGlobal(pt))
 
     # ------------------------------------------------------------ жизнь окна
+    def _pace(self):
+        """Частота кадров по делу: полная — только когда окно перед глазами и музыка играет."""
+        page = self.stack.currentWidget()
+        active = self.isActiveWindow() and not self.isMinimized()
+        try:
+            playing = bool(self.owner.is_playing())
+        except Exception:
+            playing = True
+        if self.isMinimized():
+            ms, bar = 500, 500
+        elif page in (self.now, self.home):
+            if page is self.now and time.monotonic() < max(self.now.vol_until, self.now._glide_until,
+                                                           self.now._mouse_t + 1.0) + 0.5:
+                ms = 16                                     # громкость, переезд текста, мышь над обложкой — 60 кадров
+            else:                                           # само по себе текст и волны идут в 30 кадров
+                ms = (33 if playing else 50) if active else (100 if playing else 250)
+            bar = 33 if (active and playing) else 250
+        else:
+            ms, bar = 250, (33 if (active and playing) else 250)
+        if self.timer.interval() != ms:
+            self.timer.setInterval(ms)
+        if self.bar._pos_timer.interval() != bar:
+            self.bar._pos_timer.setInterval(bar)
+
     def tick(self):
+        self._pace()
+        if self.isMinimized():                              # свёрнуто — ничего не рисуем
+            return
         self.bar.sync()
         if self.queue.isVisible():
             self.queue.refresh()
         if self.stack.currentWidget() is self.home:
-            self.home.wave.update()
+            self.home.wave.animate()
             if int(time.monotonic() * 4) % 2 == 0:
                 self.home.wave.sync()
         if self.playlists.version != self._pl_version:
             self.sync_playlists()
         if self.stack.currentWidget() is self.now:
-            self.now.update()
-            self.now.wave.update()
+            self.now.update()                               # волна внутри страницы перерисуется вместе с ней
             if int(time.monotonic() * 4) % 2 == 0:
                 self.now.wave.sync()
         lp = getattr(self.owner, "loaded_path", None)
@@ -3162,7 +3230,10 @@ class LibraryWindow(QWidget):
         if not self.lib.scanning and len(self.lib) != self._built_n:
             self.rebuild()
         if self.lib.auto_version != self._auto_v:           # нашлись исполнители в интернете
-            self.covers.forget_missing()                    # теперь по исполнителю найдётся и обложка
+            paths, self.lib.auto_paths = self.lib.auto_paths, []
+            for p in paths:                                 # теперь по исполнителю найдётся и обложка
+                if self.covers.mem.get(p, 0) is None:
+                    self.covers.mem.pop(p, None)
             self.bar._art_key = None
             self.rebuild(force=True)
 

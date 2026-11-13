@@ -2622,7 +2622,7 @@ class Mp3Widget(QWidget):
              md.stringValue(QMediaMetaData.Key.AlbumArtist))
         if t:
             self.title = t.strip()
-        if a:
+        if a and not libmod.junk_artist(a.strip()):          # «Y2mate.mx» в теге — не исполнитель
             self.artist = a.strip()
         al = md.stringValue(QMediaMetaData.Key.AlbumTitle)
         if al:

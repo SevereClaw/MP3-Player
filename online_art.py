@@ -230,4 +230,31 @@ def find_artist(title, duration=0.0, album="", name=""):
         srcs.insert(2, lambda: itunes("JP"))
     if not _FAKE.search(f"{title} {name}"):
         srcs.append(lambda: deezer(f'track:"{title}"', loose))
+    got = _try(srcs)
+    if got:
+        return got
+    # в названии и песня, и что-то ещё: «Исполнитель — Песня», «Песня - Instrumental version», «Аниме — Песня»
+    parts = [x.strip() for x in re.split(r"\s[-–—|]\s|\s*[—|]\s*", title) if len(norm(x)) >= 2]
+    if len(parts) < 2 or len(parts) > 3:
+        return None
+    import library as _lib
+
+    def pair(a, t):                                          # правда ли «a» — исполнитель песни «t»
+        d = _get_json("https://api.deezer.com/search?" + urllib.parse.urlencode(
+            {"q": f'artist:"{a}" track:"{t}"', "limit": 15}))
+        for r in d.get("data", []):
+            ra = (r.get("artist") or {}).get("name")
+            if ra and similar(ra, a) and _same_title(r.get("title"), t):
+                return ra
+        return None
+
+    def by_title(t):
+        return find_artist(t, duration, album)
+
+    songs = [x for x in parts if not _lib.VERSION_RE.match(x)]
+    srcs = []
+    if len(parts) == 2 and len(songs) == 2:
+        srcs += [lambda: pair(parts[0], parts[1]), lambda: pair(parts[1], parts[0])]
+    for x in sorted(songs, key=len, reverse=True)[:2]:
+        srcs.append(lambda x=x: by_title(x))
     return _try(srcs)

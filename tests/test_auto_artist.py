@@ -33,6 +33,7 @@ DEEZER = {"data": [
      "album": {"title": "A Night at the Opera"}},
     {"title": "Bohemian Rhapsody (Karaoke Version)", "duration": 354, "rank": 999999, "artist": {"name": "Sing King"},
      "album": {"title": "Hits"}},
+    {"title": "Life Will Change", "duration": 262, "rank": 900, "artist": {"name": "Lyn"}, "album": {"title": "P5"}},
     {"title": "Группа крови", "duration": 286, "artist": {"name": "Кино"}, "album": {"title": "Группа крови"}},
 ]}
 calls = []
@@ -54,6 +55,10 @@ check("оригинал, а не караоке и не перепевка", oa.
 check("длительность гуляет (рип из игры) — самый популярный с тем же названием",
       oa.find_artist("Bohemian Rhapsody", 340), "Queen")
 check("но не совсем другая длина", oa.find_artist("Bohemian Rhapsody", 120), None)
+check("«Песня - Instrumental version» — ищем саму песню",
+      oa.find_artist("Life Will Change - Instrumental version", 262), "Lyn")
+check("«Исполнитель — Песня» в названии", oa.find_artist("Queen — Bohemian Rhapsody"), "Queen")
+check("«Песня — Исполнитель» в названии", oa.find_artist("Группа крови - Кино"), "Кино")
 check("пустое название", oa.find_artist("", 200), None)
 
 
@@ -67,6 +72,18 @@ try:
     check("нет сети → Offline", "нет исключения", "Offline")
 except oa.Offline:
     check("нет сети → Offline", "Offline", "Offline")
+
+# ---------- мусор в тегах и имена файлов
+for junk in ("Y2mate.mx", "www.savefrom.net", "Unknown Artist", "zaycev.net", "<unknown>"):
+    check(f"мусор вместо исполнителя: {junk}", library.junk_artist(junk), True)
+for good in ("Кино", "Queen", "R.E.M.", "will.i.am", "Ado", "t.A.T.u.", "Mr.Kitty", "P!nk"):
+    check(f"настоящий исполнитель: {good}", library.junk_artist(good), False)
+check("тег-мусор не показывается", library.track_view("/m/x.mp3", {"t": "Fly Me", "a": "Y2mate.mx"})[1],
+      library.UNKNOWN_ARTIST)
+check("версия после дефиса — не «исполнитель - песня»",
+      library.guess_from_name("/m/Life Will Change - Instrumental version.mp3"), ("", "Life Will Change - Instrumental version"))
+check("длинное тире в имени файла", library.guess_from_name("/m/Кино — Группа крови.mp3"), ("Кино", "Группа крови"))
+check("обычное имя файла", library.guess_from_name("/m/03. Queen - Bohemian Rhapsody.mp3"), ("Queen", "Bohemian Rhapsody"))
 
 # ---------- индекс
 root = tempfile.mkdtemp()

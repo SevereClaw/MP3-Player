@@ -7,6 +7,7 @@
 """
 import base64
 import json
+import functools
 import os
 import re
 import threading
@@ -190,10 +191,36 @@ def guess_from_name(path):
     """«Кино - Группа крови.mp3» → ('Кино', 'Группа крови'); номер в начале отбрасывается."""
     stem = os.path.splitext(os.path.basename(path))[0]
     stem = re.sub(r"^\s*\d{1,3}\s*[.\-_)]\s*", "", stem)
-    if " - " in stem:
-        a, t = stem.split(" - ", 1)
-        return a.strip(), t.strip()
+    m = re.search(r"\s[-–—]\s", stem)
+    if m:
+        a, t = stem[:m.start()].strip(), stem[m.end():].strip()
+        if a and t and not VERSION_RE.match(t) and not junk_artist(a):   # «Песня - Instrumental version» — не «исполнитель - песня»
+            return a, t
     return "", stem.strip()
+
+
+# хвост названия, а не название: «… - Instrumental version», «… — TV Size»
+VERSION_RE = re.compile(r"^[\[(]?\s*(instrumental|inst\.?|karaoke|off[ -]?vocal|vocal|remix|live|acoustic|ost|tv[ -]?size|"
+                        r"full|extended|short|piano|orchestral|original|remaster(ed)?|cover|nightcore|slowed|sped up|"
+                        r"минус|инструментал|ремикс|кавер)(\s+(version|ver\.?|mix|edit|size|версия))?\s*[\])]?$", re.I)
+_JUNK_RE = re.compile(r"^(www\.)?[\w\-]+\.(com|net|org|mx|ru|cc|io|me|to|biz|info|fm|tv|app|pro|xyz|co|site|online|top|"
+                      r"club|su|ua|by|kz|is|ws|vip)$|y2mate|savefrom|ssyoutube|mp3juice|zaycev|muzofond|hitmo|mp3party|"
+                      r"drivemusic|tubidy|snaptube|youtube|vk\.com|t\.me/|^https?:", re.I)
+_JUNK_NAMES = {"unknown", "unknown artist", "<unknown>", "неизвестен", "неизвестный исполнитель", "artist", "n/a",
+               "na", "none", "null", "-", "?", "track", "untitled"}
+
+
+@functools.lru_cache(maxsize=4096)
+def junk_artist(name):
+    """В теге «исполнитель» не исполнитель, а мусор: сайт-качалка (Y2mate.mx), «Unknown Artist»."""
+    n = (name or "").strip()
+    return bool(n) and (n.lower() in _JUNK_NAMES or bool(_JUNK_RE.search(n)))
+
+
+def tag_artist(it):
+    """Исполнитель из тегов, если там правда исполнитель."""
+    a = it.get("a") or ""
+    return "" if junk_artist(a) else a
 
 
 # ------------------------------------------------------------------ поиск
@@ -209,7 +236,7 @@ def _entry(p, size, mtime):
 
 
 AUTO_RETRY = 30 * 86400            # не нашёлся исполнитель — снова искать через месяц
-AUTO_VER = 2                       # поиск стал умнее — ненайденное поискать заново сразу
+AUTO_VER = 3                       # поиск стал умнее — ненайденное поискать заново сразу
 
 
 def _keep_auto(new, old):
@@ -229,7 +256,7 @@ def track_view(path, it):
     """Что показывать для трека: название, исполнитель, альбом (пустые теги — из имени файла и папки)."""
     ga, gt = guess_from_name(path)
     title = it.get("t") or gt
-    artist = it.get("a") or ga or it.get("ag") or UNKNOWN_ARTIST      # "ag" — найден в интернете
+    artist = tag_artist(it) or ga or it.get("ag") or UNKNOWN_ARTIST   # "ag" — найден в интернете
     album = it.get("al") or os.path.basename(os.path.dirname(path)) or "Без альбома"
     return title, artist, album
 
@@ -298,6 +325,7 @@ class Library:
         self.scanned_at = 0.0
         self.finding = False            # идёт поиск неизвестных исполнителей в интернете
         self.auto_version = 0           # растёт, когда найденные исполнители поменялись
+        self.auto_paths = []            # кому только что нашёлся исполнитель (окно заберёт — поискать им обложки)
         self._hay = {}                  # путь → строка для поиска
         try:
             with open(cache_path, "r", encoding="utf-8") as f:
@@ -311,7 +339,7 @@ class Library:
         for p, it in self.items.items():
             folder = os.path.basename(os.path.dirname(p))
             stem = os.path.splitext(os.path.basename(p))[0]
-            hay[p] = " " + norm(" ".join((it.get("t", ""), it.get("a", "") or it.get("ag", ""), it.get("al", ""),
+            hay[p] = " " + norm(" ".join((it.get("t", ""), tag_artist(it) or it.get("ag", ""), it.get("al", ""),
                                           stem, folder)))
         self._hay = hay
 
@@ -391,7 +419,7 @@ class Library:
         """Исполнитель, найденный в интернете (если именно он сейчас показывается), иначе ''."""
         p = os.path.normpath(path)
         it = self.items.get(p) or {}
-        return "" if it.get("a") or guess_from_name(p)[0] else it.get("ag", "")
+        return "" if tag_artist(it) or guess_from_name(p)[0] else it.get("ag", "")
 
     def reject_artist(self, path):
         """«Не тот исполнитель»: убрать найденное и больше для этого трека не искать."""
@@ -411,7 +439,7 @@ class Library:
         now = now or time.time()
         with self.lock:
             return [p for p, it in self.items.items()
-                    if not it.get("a") and not it.get("ag") and not it.get("agx")
+                    if not tag_artist(it) and not it.get("ag") and not it.get("agx")
                     and (now - (it.get("agt") or 0) > AUTO_RETRY or it.get("agv") != AUTO_VER)
                     and not guess_from_name(p)[0]]
 
@@ -428,13 +456,13 @@ class Library:
         def work():
             import online_art as oa
             fn = lookup or oa.find_artist
-            found, last_save = 0, time.time()
+            fresh, last_save = 0, time.time()             # fresh — нашлось с прошлого показа
             try:
                 for p in todo:
                     if not enabled():
                         break
                     it = self.items.get(p)
-                    if it is None or it.get("a") or it.get("ag") or it.get("agx"):
+                    if it is None or tag_artist(it) or it.get("ag") or it.get("agx"):
                         continue
                     stem = os.path.splitext(os.path.basename(p))[0]
                     try:
@@ -450,12 +478,17 @@ class Library:
                         it["agt"], it["agv"] = int(time.time()), AUTO_VER
                         if name and not it.get("agx"):
                             it["ag"] = str(name).strip()
-                            found += 1
-                    if found and time.time() - last_save > 10:       # показывать по мере того, как находятся
-                        last_save = time.time()
+                            self.auto_paths.append(p)
+                            fresh += 1
+                    # показывать по мере того, как находятся, но редко: каждое обновление перестраивает медиатеку
+                    if fresh and time.time() - last_save > 30:
+                        fresh, last_save = 0, time.time()
                         self._auto_changed()
             finally:
-                self._auto_changed()
+                if fresh:
+                    self._auto_changed()
+                else:
+                    self.save()                              # запомнить, что уже искали
                 self.finding = False
                 if done:
                     done()
