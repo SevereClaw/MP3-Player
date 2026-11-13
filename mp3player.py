@@ -1606,6 +1606,55 @@ class Mp3Widget(QWidget):
         self.flash("DOULANDER НАЙДЕН", 2.0)
         return d
 
+    # ------------------------------------------------------------ папка с музыкой — спросить сразу
+    def has_music_folder(self):
+        return any(os.path.isdir(f) for f in self.cfg.get("folders") or [])
+
+    def add_music_folder(self, folder):
+        """Добавить папку в «Папки с музыкой» (если её там ещё нет) и пересканировать."""
+        folder = npath(folder)
+        folders = self.cfg.setdefault("folders", [])
+        if not any(pkey(f) == pkey(folder) for f in folders):
+            folders.append(folder)
+            self.save_later()
+            self.scan_library(force=True)
+
+    def ask_music_folder(self, why, parent=None):
+        """Спросить папку с музыкой прямо сейчас, чтобы не искать её потом в настройках.
+        Возвращает выбранную папку или None, если пользователь отказался."""
+        self.cfg["asked_music_folder"] = True
+        self.save_later()
+        box = QMessageBox(parent)
+        box.setWindowTitle("Папка с музыкой")
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText(why)
+        pick = box.addButton("Выбрать папку…", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Позже", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is not pick:
+            return None
+        start = os.path.join(os.path.expanduser("~"), "Music")
+        d = QFileDialog.getExistingDirectory(parent, "Папка с музыкой", start if os.path.isdir(start) else "")
+        if not d:
+            return None
+        self.add_music_folder(d)
+        self.flash("ПАПКА С МУЗЫКОЙ ВЫБРАНА", 2.5)
+        return npath(d)
+
+    def _music_folder_for_download(self):
+        """Перед скачиванием: папки с музыкой ещё нет — спросить её сейчас (туда и скачаем).
+        Возвращает (можно_качать, папка_или_None)."""
+        if self.has_music_folder():
+            return True, None
+        d = self.ask_music_folder("Куда сохранять скачанную музыку?\n\n"
+                                  "Выбери папку с музыкой: треки будут скачиваться в неё, "
+                                  "и из неё же медиатека берёт альбомы и исполнителей.")
+        if not d:
+            self.flash("⬇ СНАЧАЛА ВЫБЕРИ ПАПКУ", 2.5)
+            return False, None
+        self.cfg["download_dir"] = d
+        return True, d
+
     def download_target(self):
         """Куда качать: текущая папка; если её нет (радио, избранное) — последняя
         папка загрузок или папка загрузок Doulander."""
@@ -1625,7 +1674,10 @@ class Mp3Widget(QWidget):
         d = self.doulander_dir()
         if not d:
             return
-        target = self.download_target()
+        ok, chosen = self._music_folder_for_download()
+        if not ok:
+            return
+        target = chosen or self.download_target()
         if not url:
             from PySide6.QtWidgets import QInputDialog
             clip = (QApplication.clipboard().text() or "").strip()
@@ -1643,7 +1695,11 @@ class Mp3Widget(QWidget):
         d = self.doulander_dir()
         if not d:
             return
-        target = target or self.download_target()
+        if not target:
+            ok, chosen = self._music_folder_for_download()
+            if not ok:
+                return
+            target = chosen or self.download_target()
         self.cfg["download_dir"] = target
         n = self.dl.add(d, url, target)
         self.flash(f"⬇ В ОЧЕРЕДИ: {n + 1}" if n else "⬇ СКАЧИВАЮ…", 2.0)
@@ -1688,6 +1744,9 @@ class Mp3Widget(QWidget):
             self.playlist_panel.set_tracks(self.files, self.current_index())
         self.update_tray_tip()
         self.library.update(path)                    # новый трек сразу находится поиском
+        if folder and not any(pkey(folder) == pkey(r) or pkey(folder).startswith(pkey(r).rstrip("\\/") + os.sep)
+                              for r in self.cfg.get("folders") or []):
+            self.add_music_folder(folder)            # куда скачали — то и папка с музыкой, выбирать потом не надо
 
     def show_message(self, title, text):
         if hasattr(self, "tray") and self.tray.isVisible():
@@ -2267,6 +2326,11 @@ class Mp3Widget(QWidget):
             lw.showNormal()
         self.scan_library()
         lw.open()
+        if not self.has_music_folder() and not self.cfg.get("asked_music_folder"):
+            # первый запуск: спросить папку сразу, а не ждать, пока человек найдёт её в настройках
+            QTimer.singleShot(500, lambda: self.ask_music_folder(
+                "Где лежит твоя музыка?\n\nВыбери папку — медиатека возьмёт из неё альбомы и исполнителей.\n"
+                "Добавить ещё папки или поменять можно в «Настройках».", lw))
         if sys.platform == "win32":
             try:
                 import ctypes
