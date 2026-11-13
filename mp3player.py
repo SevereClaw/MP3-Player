@@ -2338,6 +2338,60 @@ class Mp3Widget(QWidget):
             self.cfg["before_fav"] = self.current_folder()
         self.load_sources(files, start_path=start, autoplay=True, fav=True, smart_kind=smart_kind)
 
+    # ------------------------------------------------------------ очередь «Далее» (для медиатеки)
+    def queue_upcoming(self, limit=300):
+        if self.radio or not self.order:
+            return []
+        return [self.files[i] for i in self.order[self.pos_in_order + 1:self.pos_in_order + 1 + limit]]
+
+    def queue_move(self, src, dst):
+        base = self.pos_in_order + 1
+        if 0 <= src < len(self.order) - base:
+            it = self.order.pop(base + src)
+            self.order.insert(base + max(0, min(dst, len(self.order) - base)), it)
+
+    def queue_remove(self, rel):
+        base = self.pos_in_order + 1
+        if 0 <= rel < len(self.order) - base:
+            self.order.pop(base + rel)
+
+    def queue_clear(self):
+        del self.order[self.pos_in_order + 1:]
+        if self.cfg.get("smart") == "wave":
+            QTimer.singleShot(0, self.wave_extend)        # волна сама подольёт новое
+
+    def queue_jump(self, rel):
+        base = self.pos_in_order + 1
+        if 0 <= rel < len(self.order) - base:
+            self.pos_in_order = base + rel
+            self.load_current(autoplay=True, fade_ms=self.fade_ms("skip"))
+
+    def queue_insert(self, paths, row=None):
+        """Вставить треки в очередь: row=0 — сразу следующими, None — в конец."""
+        if self.radio or not self.files:
+            self.play_list(list(paths), None)
+            return
+        base = self.pos_in_order + 1
+        at = len(self.order) if row is None else base + max(0, min(row, len(self.order) - base))
+        index = {pkey(f): i for i, f in enumerate(self.files)}
+        new = []
+        for p in paths:
+            p = npath(p)
+            i = index.get(pkey(p))
+            if i is None:
+                self.files.append(p)
+                i = len(self.files) - 1
+                index[pkey(p)] = i
+            new.append(i)
+        cur = self.current_index()
+        # уже стоящие в очереди дальше — переносим, а не дублируем
+        tail = [i for i in self.order[base:] if i not in new or i == cur]
+        before = [i for i in self.order[base:at] if i in tail]
+        after = [i for i in tail if i not in before]
+        self.order[base:] = before + new + after
+        if self.playlist_panel.isVisible():
+            self.playlist_panel.set_tracks(self.files, self.current_index())
+
     def queue_next(self, path):
         """Поставить трек сразу после текущего (не ломая плейлист)."""
         path = npath(path)
@@ -3283,6 +3337,9 @@ class Mp3Widget(QWidget):
                     30.0 if self.radio else min(30.0, dur / 2000.0)):
                 self._play_counted = True
                 self.stats.add_play(key)
+                if key and not self.radio:            # «Недавно играло» на главной медиатеки
+                    rec = [p for p in (self.cfg.get("recent") or []) if p != key]
+                    self.cfg["recent"] = ([key] + rec)[:40]
         if REELS and self.is_playing():
             self.reel_angle = (self.reel_angle + dt * 160) % 360
             self.update()

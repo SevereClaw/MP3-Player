@@ -90,7 +90,7 @@ jobs:
           --hidden-import geom3d --hidden-import radio --hidden-import doulander_link
           --hidden-import updater --hidden-import build_info --hidden-import lyrics_online --hidden-import loudness
           --collect-submodules mutagen --hidden-import eq --hidden-import dsp_player --collect-all av
-          --hidden-import weekly --hidden-import weekly_ui --hidden-import lrc_maker --hidden-import library --hidden-import library_ui --hidden-import mywave
+          --hidden-import weekly --hidden-import weekly_ui --hidden-import lrc_maker --hidden-import library --hidden-import library_ui --hidden-import library_more --hidden-import mywave
           launch.py
 
       - name: Smoke test - the exe starts and keeps running

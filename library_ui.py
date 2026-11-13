@@ -11,7 +11,7 @@ import sys
 import threading
 import time
 
-from PySide6.QtCore import (Qt, QTimer, QRect, QRectF, QPointF, QSize, QObject, Signal, QModelIndex,
+from PySide6.QtCore import (Qt, QTimer, QRect, QRectF, QPoint, QPointF, QSize, QObject, Signal, QModelIndex,
                             QAbstractListModel, QBuffer, QIODevice, QEvent)
 from PySide6.QtGui import (QPainter, QColor, QFont, QFontMetrics, QPixmap, QImage, QPolygonF, QLinearGradient,
                            QPainterPath, QPen, QBrush, QIcon, QTransform)
@@ -239,6 +239,23 @@ class ListModel(QAbstractListModel):
             return r.get("path") or r.get("title") or r.get("name")
         return None
 
+    def flags(self, index):
+        f = super().flags(index)
+        if index.isValid() and self.rows[index.row()].get("path"):
+            f |= Qt.ItemFlag.ItemIsDragEnabled
+        return f
+
+    def mimeTypes(self):
+        return ["application/x-mp3p-paths", "text/uri-list"]
+
+    def mimeData(self, indexes):
+        from library_more import make_mime
+        paths = [self.rows[i.row()]["path"] for i in indexes if i.isValid() and self.rows[i.row()].get("path")]
+        return make_mime(paths)
+
+    def supportedDragActions(self):
+        return Qt.DropAction.CopyAction | Qt.DropAction.MoveAction
+
     def refresh_path(self, path):
         for i, r in enumerate(self.rows):
             if r.get("cover_path") == path or r.get("path") == path:
@@ -267,7 +284,17 @@ class TileDelegate(QStyledItemDelegate):
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         side = rect.width()
         art = QRectF(rect.left(), rect.top(), side, side)
-        pm = cover_pixmap(self.win.covers, r.get("cover_path"), int(side), r.get("title") or r.get("name"))
+        if r.get("cover_img") is not None or r.get("pid"):
+            img = r.get("cover_img")
+            if r.get("pid"):
+                from library_more import playlist_image
+                pl = self.win.playlists.get(r["pid"])
+                img = playlist_image(self.win, pl) if pl else None
+            pm = (QPixmap.fromImage(img.scaled(int(side), int(side), Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                                               Qt.TransformationMode.SmoothTransformation)).copy(0, 0, int(side), int(side))
+                  if img is not None else placeholder(int(side), r.get("title", "")))
+        else:
+            pm = cover_pixmap(self.win.covers, r.get("cover_path"), int(side), r.get("title") or r.get("name"))
         if self.round_art:
             # исполнитель — портрет в скошенной рамке
             poly = skew_poly(art, side * 0.16)
@@ -427,6 +454,51 @@ class TrackView(QListView):
         self.setModel(self.model_)
         self.setItemDelegate(TrackDelegate(win, show_album))
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)   # Shift / Ctrl — несколько
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
+        self.setDefaultDropAction(Qt.DropAction.CopyAction)
+        self.reorder = None            # fn(src, dst) — перетаскивание внутри списка (плейлист, очередь)
+        self.external_drop = None      # fn(paths, row) — бросили треки снаружи
+
+    def selected_paths(self):
+        rows = sorted({i.row() for i in self.selectedIndexes()})
+        return [self.model_.rows[r]["path"] for r in rows if r < len(self.model_.rows)]
+
+    def dragEnterEvent(self, e):
+        if (e.source() is self and self.reorder) or (e.source() is not self and self.external_drop):
+            e.acceptProposedAction()
+        else:
+            e.ignore()
+
+    def dragMoveEvent(self, e):
+        self.dragEnterEvent(e)
+        if e.isAccepted():
+            super().dragMoveEvent(e)
+            e.acceptProposedAction()
+
+    def dropEvent(self, e):
+        ix = self.indexAt(e.position().toPoint())
+        row = ix.row() if ix.isValid() else len(self.model_.rows)
+        if ix.isValid() and e.position().y() > self.visualRect(ix).center().y():
+            row += 1
+        if e.source() is self and self.reorder:
+            src = sorted({i.row() for i in self.selectedIndexes()})
+            if len(src) == 1:
+                s0 = src[0]
+                self.reorder(s0, row - 1 if row > s0 else row)
+            e.setDropAction(Qt.DropAction.CopyAction)
+            e.accept()
+        elif self.external_drop:
+            from library_more import paths_from_mime
+            paths = paths_from_mime(e.mimeData())
+            if paths:
+                self.external_drop(paths, row)
+            e.accept()
+        else:
+            e.ignore()
 
 
 # ---------------------------------------------------------------- шапка альбома / исполнителя
@@ -444,8 +516,9 @@ class Header(QWidget):
         self.setMouseTracking(True)
         self.hover = None
 
-    def set(self, kind, title, sub, meta, cover_path):
+    def set(self, kind, title, sub, meta, cover_path, cover_fn=None):
         self.kind, self.title, self.sub, self.meta, self.cover_path = kind, title, sub, meta, cover_path
+        self.cover_fn = cover_fn        # плейлист: своя картинка или мозаика
         self.update()
 
     def paintEvent(self, _e):
@@ -456,7 +529,14 @@ class Header(QWidget):
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(CYAN)
         p.drawRect(art.translated(9, 9))
-        p.drawPixmap(art.toRect(), cover_pixmap(self.win.covers, self.cover_path, 200, self.title))
+        img = self.cover_fn() if getattr(self, "cover_fn", None) else None
+        if img is not None:
+            p.drawPixmap(art.toRect(), QPixmap.fromImage(img.scaled(200, 200, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                                                                    Qt.TransformationMode.SmoothTransformation)).copy(0, 0, 200, 200))
+        elif getattr(self, "cover_fn", None):
+            p.drawPixmap(art.toRect(), placeholder(200, self.title))
+        else:
+            p.drawPixmap(art.toRect(), cover_pixmap(self.win.covers, self.cover_path, 200, self.title))
         x = art.right() + 40
         p.setFont(pfont(13))
         p.setPen(CYAN)
@@ -528,7 +608,16 @@ class DetailPage(QWidget):
         self.back.clicked.connect(win.go_back)
         top.addWidget(self.back)
         top.addStretch(1)
+        self.pl_btns = []
+        for text, fn in (("✎ ПЕРЕИМЕНОВАТЬ", lambda: win.rename_playlist(self.pid)),
+                         ("🖼 ОБЛОЖКА", lambda: win.playlist_cover(self.pid)),
+                         ("🗑 УДАЛИТЬ", lambda: win.delete_playlist(self.pid))):
+            b = P3Action(text)
+            b.clicked.connect(fn)
+            top.addWidget(b)
+            self.pl_btns.append(b)
         lay.addLayout(top)
+        self.pid = None
         self.header = Header(win)
         lay.addWidget(self.header)
         self.tracks = TrackView(win)
@@ -537,9 +626,45 @@ class DetailPage(QWidget):
         self.header.play.connect(lambda: win.play_paths(self.paths, None))
         self.header.shuffle.connect(lambda: win.play_paths(self.paths, None, shuffle=True))
         self.tracks.doubleClicked.connect(lambda ix: win.play_paths(self.paths, self.paths[ix.row()]))
-        self.tracks.customContextMenuRequested.connect(lambda pt: win.track_menu(self.tracks, pt, self.paths))
+        self.tracks.customContextMenuRequested.connect(
+            lambda pt: win.track_menu(self.tracks, pt, self.paths, playlist=self.pid))
+
+    def _mode(self, pid):
+        self.pid = pid
+        for b in self.pl_btns:
+            b.setVisible(pid is not None)
+        self.tracks.reorder = self._reorder if pid else None
+        self.tracks.external_drop = self._drop if pid else None
+
+    def _reorder(self, src, dst):
+        self.win.playlists.move(self.pid, src, dst)
+        self.win.playlists_changed()
+
+    def _drop(self, paths, row):
+        n = self.win.playlists.add(self.pid, paths)
+        self.win.toast(f"＋ {n} В ПЛЕЙЛИСТ" if n else "УЖЕ ЕСТЬ")
+        self.win.playlists_changed()
+
+    def show_playlist(self, pl):
+        self._mode(pl["id"])
+        items = self.win.items
+        self.paths = [p for p in pl["tracks"]]
+        rows, dur = [], 0
+        for i, pth in enumerate(self.paths):
+            it = items.get(pth, {})
+            t, a, alb = libmod.track_view(pth, it)
+            dur += it.get("d") or 0
+            rows.append({"path": pth, "title": t, "artist": a, "album": alb, "d": it.get("d"), "num": i + 1})
+        self.tracks.setItemDelegate(TrackDelegate(self.win, show_album=True))
+        self.tracks.model_.set_rows(rows)
+        from library_more import playlist_image
+        self.header.set("ПЛЕЙЛИСТ", pl["name"], f"{len(self.paths)} трек." if self.paths else "пока пусто",
+                        f"{fmt_total(dur)} · перетаскивай треки, чтобы поменять порядок" if self.paths else
+                        "Перетащи сюда треки или ПКМ по треку → «В плейлист…»", None,
+                        cover_fn=lambda pl=pl: playlist_image(self.win, pl))
 
     def show_album(self, al):
+        self._mode(None)
         items = self.win.items
         self.paths = list(al["tracks"])
         rows = []
@@ -554,6 +679,7 @@ class DetailPage(QWidget):
                         f"{len(self.paths)} трек. · {fmt_total(al['duration'])}", al["cover_path"])
 
     def show_artist(self, ar):
+        self._mode(None)
         items = self.win.items
         self.paths = list(ar["tracks"])
         rows = []
@@ -1097,6 +1223,10 @@ class PlayerBar(QWidget):
         self.vol.setRange(0, 100)
         self.vol.setFixedWidth(100)
         self.vol.valueChanged.connect(lambda v: (win.owner.player.setVolume(v / 100), win.owner.save_later()))
+        self.queue_btn = P3Chip("☰  ДАЛЕЕ")
+        self.queue_btn.setToolTip("Очередь: что будет играть дальше")
+        self.queue_btn.clicked.connect(lambda: win.toggle_queue())
+        lay.addWidget(self.queue_btn)
         vl = QLabel("🔊")
         vl.setObjectName("time")
         lay.addWidget(vl)
@@ -1528,6 +1658,10 @@ class LibraryWindow(QWidget):
         self.history = []
         self._built_n = -1
         self._detail_obj = None
+        import library_more as more
+        self.more = more
+        self.playlists = more.Playlists(getattr(owner, "data_dir", os.path.dirname(cache_dir)))
+        self._pl_version = -1
 
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -1552,13 +1686,40 @@ class LibraryWindow(QWidget):
         sl.addWidget(self.search)
         sl.addSpacing(14)
         self.nav = {}
-        for key, text in (("albums", "АЛЬБОМЫ"), ("artists", "ИСПОЛНИТЕЛИ"), ("tracks", "ВСЕ ТРЕКИ"),
-                          ("now", "СЕЙЧАС ИГРАЕТ"), ("settings", "НАСТРОЙКИ")):
+        for key, text in (("home", "ГЛАВНАЯ"), ("albums", "АЛЬБОМЫ"), ("artists", "ИСПОЛНИТЕЛИ"),
+                          ("tracks", "ВСЕ ТРЕКИ"), ("now", "СЕЙЧАС ИГРАЕТ"), ("settings", "НАСТРОЙКИ")):
             b = NavButton(text)
+            b.setFixedHeight(42)
             b.clicked.connect(lambda _=False, k=key: self.go(k))
             sl.addWidget(b)
             self.nav[key] = b
-        sl.addStretch(1)
+        sl.addSpacing(12)
+        plh = QHBoxLayout()
+        pll = QLabel("ПЛЕЙЛИСТЫ")
+        pll.setObjectName("sec")
+        plh.addWidget(pll)
+        plh.addStretch(1)
+        self.new_pl = self.more.SidePlaylist("+")
+        self.new_pl.setFixedWidth(46)
+        self.new_pl.setCheckable(False)
+        self.new_pl.setToolTip("Новый плейлист (можно перетащить сюда треки)")
+        self.new_pl.clicked.connect(lambda: self.new_playlist())
+        self.new_pl.dropped.connect(lambda paths: self.new_playlist(paths))
+        plh.addWidget(self.new_pl)
+        sl.addLayout(plh)
+        self.pl_box = QVBoxLayout()
+        self.pl_box.setSpacing(0)
+        self.pl_box.setContentsMargins(0, 0, 0, 0)
+        plw = QWidget()
+        plw.setLayout(self.pl_box)
+        self.pl_scroll = __import__("PySide6.QtWidgets", fromlist=["QScrollArea"]).QScrollArea()
+        self.pl_scroll.setWidgetResizable(True)
+        self.pl_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.pl_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.pl_scroll.setStyleSheet("QScrollArea, QScrollArea > QWidget > QWidget { background:transparent; }")
+        self.pl_scroll.setWidget(plw)
+        sl.addWidget(self.pl_scroll, 1)
+        self.pl_btns = {}
         mini = NavButton("▣  МАЛЕНЬКИЙ ПЛЕЕР", small=True)
         mini.setFixedWidth(215)
         mini.setToolTip("Спрятать медиатеку — останется маленький плеер на рабочем столе и значок в трее")
@@ -1588,7 +1749,8 @@ class LibraryWindow(QWidget):
         self.detail = DetailPage(self)
         self.now = NowPlaying(self)
         self.settings = SettingsPage(self)
-        for key, w, title in (("albums", self.albums_view, "АЛЬБОМЫ"), ("artists", self.artists_view, "ИСПОЛНИТЕЛИ"),
+        self.home = self.more.HomePage(self)
+        for key, w, title in (("home", self.home, None), ("albums", self.albums_view, "АЛЬБОМЫ"), ("artists", self.artists_view, "ИСПОЛНИТЕЛИ"),
                               ("tracks", self.tracks_view, "ВСЕ ТРЕКИ"), ("detail", self.detail, None),
                               ("now", self.now, None), ("settings", self.settings, None)):
             page = w
@@ -1605,7 +1767,14 @@ class LibraryWindow(QWidget):
                 pl.addWidget(w, 1)
             self.pages[key] = page
             self.stack.addWidget(page)
-        right.addWidget(self.stack, 1)
+        mid = QHBoxLayout()
+        mid.setContentsMargins(0, 0, 0, 0)
+        mid.setSpacing(0)
+        mid.addWidget(self.stack, 1)
+        self.queue = self.more.QueuePanel(self)
+        self.queue.hide()
+        mid.addWidget(self.queue)
+        right.addLayout(mid, 1)
         self.bar = PlayerBar(self)
         right.addWidget(self.bar)
         root.addLayout(right, 1)
@@ -1613,8 +1782,14 @@ class LibraryWindow(QWidget):
         self.timer = QTimer(self, interval=80)
         self.timer.timeout.connect(self.tick)
         self._last_path = None
+        self._toast = QLabel(self)
+        self._toast.setObjectName("toast")
+        self._toast.hide()
+        self._toast_timer = QTimer(self, singleShot=True, interval=1800)
+        self._toast_timer.timeout.connect(self._toast.hide)
         self.restyle()
-        self.go("albums")
+        self.sync_playlists()
+        self.go("home")
 
     # ------------------------------------------------------------ стиль
     def restyle(self):
@@ -1626,6 +1801,15 @@ class LibraryWindow(QWidget):
             #count {{ color:{d}; font-size:12px; font-style:italic; }}
             #h1 {{ font-size:34px; font-weight:900; font-style:italic; color:{w}; }}
             #sec {{ font-size:20px; font-weight:900; font-style:italic; color:{c}; letter-spacing:1px; }}
+            #h2 {{ font-size:26px; font-weight:900; font-style:italic; color:{w}; }}
+            #qnow {{ font-size:13px; font-weight:bold; font-style:italic; color:{c}; padding:4px 0; }}
+            #hero {{ background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 rgba(47,211,255,40),
+                     stop:0.5 rgba(11,34,87,160), stop:1 rgba(3,10,31,200)); border:2px solid {c}; }}
+            #toast {{ background:{c}; color:{NAVY.name()}; font-size:15px; font-weight:900; font-style:italic;
+                      padding:8px 22px; }}
+            QInputDialog, QMessageBox {{ background:{NAVY.name()}; }}
+            QInputDialog QPushButton, QMessageBox QPushButton {{ background:{CYAN_D.name()}; color:{w};
+                      border:none; padding:6px 18px; font-weight:bold; font-style:italic; }}
             #srow {{ background:transparent; }}
             #srow:hover {{ background:rgba(47,211,255,18); }}
             #stitle {{ font-size:15px; font-weight:bold; font-style:italic; color:{w}; }}
@@ -1705,6 +1889,8 @@ class LibraryWindow(QWidget):
             v.model_.refresh_path(path)
             v.viewport().update()
         self.detail.header.update()
+        for _lb, strip, _k in self.home.sections.values():
+            strip.viewport().update()
         if path == getattr(self.owner, "loaded_path", None):
             self.bar._art_key = None
             self.now.update()
@@ -1718,24 +1904,155 @@ class LibraryWindow(QWidget):
         self.stack.setCurrentWidget(self.pages[key])
         for k, b in self.nav.items():
             b.setChecked(k == key)
-        self.timer.setInterval(16 if key == "now" else 250)      # «Сейчас играет» — 60 кадров в секунду
+        self.timer.setInterval(16 if key in ("now", "home") else 250)      # волны и «Сейчас играет» — 60 кадров
+        if hasattr(self, "pl_btns"):
+            self._mark_playlist()
 
     def _state(self):
         w = self.stack.currentWidget()
         if w is self.pages["detail"]:
             return ("detail", self._detail_obj)
-        return (next((k for k, v in self.pages.items() if v is w), "albums"), None)
+        return (next((k for k, v in self.pages.items() if v is w), "home"), None)
 
     def go_back(self):
         if not self.history:
-            self.go("albums", remember=False)
+            self.go("home", remember=False)
             return
         key, obj = self.history.pop()
         if key == "detail" and obj is not None:
             kind, data = obj
-            (self.detail.show_album if kind == "album" else self.detail.show_artist)(data)
+            if kind == "playlist":
+                pl = self.playlists.get(data)
+                if pl is None:
+                    self.go_back()
+                    return
+                self.detail.show_playlist(pl)
+            else:
+                (self.detail.show_album if kind == "album" else self.detail.show_artist)(data)
             self._detail_obj = obj
         self.go(key, remember=False)
+        self._mark_playlist()
+
+    # ------------------------------------------------------------ плейлисты
+    def sync_playlists(self):
+        """Список плейлистов слева."""
+        while self.pl_box.count():
+            it = self.pl_box.takeAt(0)
+            wd = it.widget()
+            if wd is not None:
+                wd.hide()
+                wd.setParent(None)
+                wd.deleteLater()
+        self.pl_btns = {}
+        for pl in self.playlists.items:
+            b = self.more.SidePlaylist(pl["name"].upper())
+            b.setToolTip(f"{pl['name']} · {len(pl['tracks'])} трек.  (перетащи сюда треки)")
+            b.clicked.connect(lambda _=False, pid=pl["id"]: self.open_playlist(pid))
+            b.dropped.connect(lambda paths, pid=pl["id"]: self._drop_to_playlist(pid, paths))
+            self.pl_box.addWidget(b)
+            self.pl_btns[pl["id"]] = b
+        if not self.playlists.items:
+            hint = QLabel("Нажми «+» или перетащи\nсюда трек из списка")
+            hint.setObjectName("count")
+            self.pl_box.addWidget(hint)
+        self.pl_box.addStretch(1)
+        self._pl_version = self.playlists.version
+        self._mark_playlist()
+
+    def _mark_playlist(self):
+        cur = self._detail_obj[1] if (self._detail_obj and self._detail_obj[0] == "playlist"
+                                      and self.stack.currentWidget() is self.pages.get("detail")) else None
+        for pid, b in self.pl_btns.items():
+            b.setChecked(pid == cur)
+
+    def playlists_changed(self):
+        self.sync_playlists()
+        if self._detail_obj and self._detail_obj[0] == "playlist" and self.stack.currentWidget() is self.detail:
+            pl = self.playlists.get(self._detail_obj[1])
+            if pl:
+                self.detail.show_playlist(pl)
+        if self.stack.currentWidget() is self.home:
+            self.home.refresh()
+
+    def open_playlist(self, pid):
+        pl = self.playlists.get(pid)
+        if not pl:
+            return
+        self._detail_obj = ("playlist", pid)
+        self.detail.show_playlist(pl)
+        self.go("detail")
+        self._mark_playlist()
+
+    def new_playlist(self, paths=()):
+        name = self.more.ask_name(self, "Новый плейлист")
+        if not name:
+            return
+        pl = self.playlists.create(name, paths)
+        self.playlists_changed()
+        self.open_playlist(pl["id"])
+
+    def _drop_to_playlist(self, pid, paths):
+        pl = self.playlists.get(pid)
+        n = self.playlists.add(pid, paths)
+        self.toast(f"＋ {n} В «{pl['name']}»" if n else "УЖЕ ЕСТЬ В ПЛЕЙЛИСТЕ")
+        self.playlists_changed()
+
+    def add_to_playlist(self, paths):
+        pop = self.more.AddToPlaylist(self, paths)
+        pop.setStyleSheet(self.styleSheet())
+        pos = self.mapFromGlobal(__import__("PySide6.QtGui", fromlist=["QCursor"]).QCursor.pos())
+        pop.adjustSize()
+        x = max(10, min(self.width() - pop.width() - 10, pos.x() - pop.width() // 2))
+        y = max(10, min(self.height() - pop.height() - 10, pos.y() - 40))
+        pop.move(self.mapToGlobal(QPoint(x, y)))
+        pop.show()
+
+    def rename_playlist(self, pid):
+        pl = self.playlists.get(pid)
+        if pl:
+            name = self.more.ask_name(self, "Переименовать", pl["name"])
+            if name:
+                self.playlists.rename(pid, name)
+                self.playlists_changed()
+
+    def playlist_cover(self, pid):
+        from PySide6.QtWidgets import QFileDialog
+        fn, _ = QFileDialog.getOpenFileName(self, "Обложка плейлиста", os.path.expanduser("~\\Pictures"),
+                                            "Картинки (*.jpg *.jpeg *.png *.webp *.bmp)")
+        if fn:
+            img = QImage(fn)
+            if not img.isNull():
+                self.playlists.set_cover(pid, img)
+                self.playlists_changed()
+
+    def delete_playlist(self, pid):
+        from PySide6.QtWidgets import QMessageBox
+        pl = self.playlists.get(pid)
+        if not pl:
+            return
+        if QMessageBox.question(self, "Удалить плейлист", f"Удалить плейлист «{pl['name']}»?\n"
+                                "Сами треки останутся на диске.") != QMessageBox.StandardButton.Yes:
+            return
+        self.playlists.delete(pid)
+        self.history = [h for h in self.history if h != ("detail", ("playlist", pid))]
+        self.playlists_changed()
+        self.go("home", remember=False)
+
+    # ------------------------------------------------------------ очередь и подсказки
+    def toggle_queue(self, show=None):
+        show = (not self.queue.isVisible()) if show is None else show
+        self.queue.setVisible(show)
+        self.bar.queue_btn.setChecked(show)
+        if show:
+            self.queue.refresh(True)
+
+    def toast(self, text):
+        self._toast.setText(text)
+        self._toast.adjustSize()
+        self._toast.move((self.width() - self._toast.width()) // 2 + 120, self.height() - 92 - self._toast.height() - 16)
+        self._toast.show()
+        self._toast.raise_()
+        self._toast_timer.start()
 
     def open_album(self, al):
         self._detail_obj = ("album", al)
@@ -1761,14 +2078,26 @@ class LibraryWindow(QWidget):
         self.owner.play_list(list(paths), start, shuffle=shuffle)
         QTimer.singleShot(150, lambda: [v.viewport().update() for v in (self.tracks_view, self.detail.tracks)])
 
-    def track_menu(self, view, pt, paths):
+    def track_menu(self, view, pt, paths, playlist=None):
         ix = view.indexAt(pt)
         if not ix.isValid():
             return
         path = paths[ix.row()]
+        sel = view.selected_paths() if hasattr(view, "selected_paths") else []
+        group = sel if (len(sel) > 1 and path in sel) else [path]
         m = QMenu(self)
-        m.addAction("▶  Играть", lambda: self.play_paths(paths, path))
-        m.addAction("⏭  Играть следующим", lambda: self.owner.queue_next(path))
+        if len(group) > 1:
+            m.addAction(f"▶  Играть выбранные ({len(group)})", lambda: self.play_paths(group, group[0]))
+        else:
+            m.addAction("▶  Играть", lambda: self.play_paths(paths, path))
+        m.addAction("⏭  Играть следующим", lambda: (self.owner.queue_insert(group, 0), self.toast("⏭ СЛЕДУЮЩИМ")))
+        m.addAction("☰  Добавить в очередь", lambda: (self.owner.queue_insert(group, None),
+                                                       self.toast(f"＋ {len(group)} В ОЧЕРЕДЬ")))
+        m.addAction("➕  В плейлист…", lambda: self.add_to_playlist(group))
+        if playlist:
+            m.addAction("✖  Убрать из плейлиста", lambda: (self.playlists.remove(playlist, group),
+                                                           self.playlists_changed()))
+        m.addSeparator()
         m.addAction("✎  Теги…", lambda: self.owner.edit_tags(path))
         al = next((a for a in self.albums if path in a["tracks"]), None)
         if al:
@@ -1783,6 +2112,14 @@ class LibraryWindow(QWidget):
     # ------------------------------------------------------------ жизнь окна
     def tick(self):
         self.bar.sync()
+        if self.queue.isVisible():
+            self.queue.refresh()
+        if self.stack.currentWidget() is self.home:
+            self.home.wave.update()
+            if int(time.monotonic() * 4) % 2 == 0:
+                self.home.wave.sync()
+        if self.playlists.version != self._pl_version:
+            self.sync_playlists()
         if self.stack.currentWidget() is self.now:
             self.now.update()
             self.now.wave.update()

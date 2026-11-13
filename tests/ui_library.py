@@ -78,12 +78,25 @@ class FakeOwner:
         self.cfg = {"folders": ["C:\\Music", "D:\\Аниме OST"], "crossfade": 4000, "theme": "ГОЛУБАЯ"}
         self.shuffle, self.repeat, self.skin_id, self.scale_f, self.on_desktop, self.build = False, "all", "flash", 0.8, True, 23
         self.keeper = types.SimpleNamespace(ok=True)
+        self.data_dir = tmp
+        ps = list(lib.items)
+        import datetime as _d
+        today = _d.date.today().isoformat()
+        self.cfg["recent"] = ps[::3]
+        self.stats = types.SimpleNamespace(data={
+            "tracks": {p: {"sec": 200 * (i % 7 + 1), "plays": i % 5 + 1, "last": "2026-09-01" if i % 4 == 0 else today}
+                       for i, p in enumerate(ps)},
+            "daily": {today: {p: {"s": 100 * (i % 6 + 1), "p": 1} for i, p in enumerate(ps)}}})
         self.spectrum = types.SimpleNamespace(available=True)
 
     def __getattr__(self, name):
         return lambda *a, **k: None
 
     def is_playing(self): return True
+    def queue_upcoming(self, limit=300):
+        ps = list(lib.items)
+        i = ps.index(cur)
+        return (ps[i + 1:] + ps[:i])[:12]
     def smooth_pos(self): return self.player.position()
     def is_fav(self, p): return "Color" in p or "Война" in p
     def auto_scale_here(self): return 1.0
@@ -115,6 +128,21 @@ def dump(name):
         print("SHOTPART", name, k // 20000, b[k:k + 20000], flush=True)
 
 
+pl = w.playlists.create("Persona вайб", [p for p in lib.items if "Persona" in p or "Burn" in p])
+w.playlists.create("Ночная дорога", [p for p in lib.items if "Кино" in p or "Ado" in p][:5])
+w.playlists_changed()
+w.go("home"); dump("lib_home.jpg")
+w.open_playlist(pl["id"]); dump("lib_playlist.jpg")
+w.toggle_queue(True); dump("lib_queue.jpg")
+w.toggle_queue(False)
+from library_more import AddToPlaylist
+pop = AddToPlaylist(w, [next(iter(lib.items))]); pop.setStyleSheet(w.styleSheet()); pop.adjustSize()
+pop.show(); app.processEvents()
+pm = pop.grab(); buf = QBuffer(); buf.open(QIODevice.OpenModeFlag.WriteOnly); pm.save(buf, "JPG", 85)
+b = base64.b64encode(bytes(buf.data())).decode()
+for k in range(0, len(b), 20000):
+    print("SHOTPART", "lib_addpl.jpg", k // 20000, b[k:k + 20000], flush=True)
+pop.close()
 w.go("albums"); dump("lib_albums.jpg")
 w.go("artists"); dump("lib_artists.jpg")
 w.open_album(next(a for a in w.albums if a["title"].startswith("Persona"))); dump("lib_album.jpg")
