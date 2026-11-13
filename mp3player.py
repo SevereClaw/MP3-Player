@@ -4320,6 +4320,11 @@ class Mp3Widget(QWidget):
                               remember=False, flat=True)
         elif audio or dirs:
             self.load_sources(dirs + audio, autoplay=True)
+        if (audio or dirs) and self.cfg.get("start_library", True):
+            # открыли песню из Проводника — сразу медиатека на экране «Сейчас играет»
+            self.open_library(toggle=False)
+            QTimer.singleShot(0, lambda: self.library_win.go("now"))
+            return
         self.show_player()
 
     def assoc_register(self, quiet=False):
