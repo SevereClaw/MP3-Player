@@ -25,6 +25,14 @@ DEEZER = {"data": [
     {"title": "Unravel (Acoustic)", "duration": 250, "artist": {"name": "Кавер-группа"}, "album": {"title": "Covers"}},
     {"title": "unravel", "duration": 239, "artist": {"name": "TK from 凛として時雨"}, "album": {"title": "Fantastic Magic"}},
     {"title": "Lovely Day", "duration": 200, "artist": {"name": "Bill Withers"}, "album": {"title": "Menagerie"}},
+    {"title": "Bohemian Rhapsody", "duration": 354, "rank": 100, "artist": {"name": "The Backing Track Collective"},
+     "album": {"title": "Backing Tracks"}},
+    {"title": "Bohemian Rhapsody", "duration": 355, "rank": 5000, "artist": {"name": "Какой-то кавер"},
+     "album": {"title": "Rock Hits"}},
+    {"title": "Bohemian Rhapsody (Remastered 2011)", "duration": 354, "rank": 990000, "artist": {"name": "Queen"},
+     "album": {"title": "A Night at the Opera"}},
+    {"title": "Bohemian Rhapsody (Karaoke Version)", "duration": 354, "rank": 999999, "artist": {"name": "Sing King"},
+     "album": {"title": "Hits"}},
     {"title": "Группа крови", "duration": 286, "artist": {"name": "Кино"}, "album": {"title": "Группа крови"}},
 ]}
 calls = []
@@ -42,6 +50,7 @@ check("без длительности и альбома — не гадать",
 check("по названию и альбому", oa.find_artist("unravel", 0, "Fantastic Magic"), "TK from 凛として時雨")
 check("«Love» — это не «Lovely Day»", oa.find_artist("Love", 200), None)
 check("исполнитель в имени файла", oa.find_artist("kino_gruppa krovi", 0, "", "Кино_Группа крови"), "Кино")
+check("оригинал, а не караоке и не перепевка", oa.find_artist("Bohemian Rhapsody", 354), "Queen")
 check("пустое название", oa.find_artist("", 200), None)
 
 

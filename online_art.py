@@ -162,6 +162,11 @@ def _in_name(name, title, artist):
     return len(t) >= 3 and len(a) >= 3 and t in n and a in n and len(t) + len(a) >= len(n) * 0.6
 
 
+_FAKE = re.compile(r"karaoke|караоке|tribute|трибьют|backing track|минус|instrumental version|cover version|"
+                   r"made famous|originally performed|in the style of|8[- ]?bit|lullab|music box|piano version",
+                   re.IGNORECASE)
+
+
 def find_artist(title, duration=0.0, album="", name=""):
     """Имя исполнителя для трека без тега «исполнитель» или None. Нет сети — Offline.
 
@@ -174,6 +179,9 @@ def find_artist(title, duration=0.0, album="", name=""):
     def ok(r_title, r_artist, r_dur, r_album):
         if not r_artist:
             return False
+        fake = _FAKE.search(f"{r_title} | {r_artist} | {r_album or ''}")     # караоке, каверы, трибьюты
+        if fake and not _FAKE.search(f"{title} {album} {name}"):
+            return False
         if name and _in_name(name, r_title, r_artist):
             return True
         if not _same_title(r_title, title):
@@ -183,15 +191,17 @@ def find_artist(title, duration=0.0, album="", name=""):
         return bool(album) and similar(r_album, album)
 
     def deezer(q):
-        d = _get_json("https://api.deezer.com/search?" + urllib.parse.urlencode({"q": q, "limit": 25}))
+        d = _get_json("https://api.deezer.com/search?" + urllib.parse.urlencode({"q": q, "limit": 40}))
+        best = None                                          # из подходящих — самый популярный (оригинал, а не перепевка)
         for r in d.get("data", []):
             a = (r.get("artist") or {}).get("name")
             if ok(r.get("title"), a, r.get("duration"), (r.get("album") or {}).get("title")):
-                return a
-        return None
+                if best is None or (r.get("rank") or 0) > best[0]:
+                    best = (r.get("rank") or 0, a)
+        return best[1] if best else None
 
     def itunes(country):
-        q = {"term": f"{title} {album}".strip(), "entity": "song", "limit": 25, "country": country}
+        q = {"term": f"{title} {album}".strip(), "entity": "song", "limit": 40, "country": country}
         if country == "JP":
             q["lang"] = "ja_jp"
         d = _get_json("https://itunes.apple.com/search?" + urllib.parse.urlencode(q))
