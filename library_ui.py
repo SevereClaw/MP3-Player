@@ -535,7 +535,8 @@ def track_columns(rect, show_album=True, stats=False):
         c["plays"] = QRectF(right - 96 - 70, rect.top(), 60, rect.height())
         right -= 166
     c["fav"] = QRectF(right - 22, rect.top(), 20, rect.height())
-    x = bar.left() + 22
+    c["meter"] = QRectF(bar.left() + 14, rect.center().y() - 11, 22, 22)
+    x = bar.left() + 48
     w = right - 26 - x
     ct = w * (0.46 if show_album else 0.6)
     ca = w * (0.27 if show_album else 0.4)
@@ -557,6 +558,31 @@ class TrackDelegate(QStyledItemDelegate):
 
     def sizeHint(self, option, index):
         return QSize(400, self.H)
+
+    def _listened(self, path):
+        t = self.win._stat_tracks().get(path) if hasattr(self.win, "_stat_tracks") else None
+        return (float(t.get("sec") or 0), int(t.get("plays") or 0)) if t else (0.0, 0)
+
+    def _max_for(self, model):
+        """Самое большое время прослушивания среди строк этого списка (пересчёт — когда строки поменялись)."""
+        rows = getattr(model, "rows", [])
+        key = (id(rows), len(rows))
+        if getattr(model, "_mx_key", None) != key:
+            model._mx_key = key
+            model._mx = max([self._listened(r.get("path"))[0] for r in rows if r.get("path")] + [0.0])
+        return model._mx
+
+    def helpEvent(self, event, view, option, index):
+        r = index.data(Qt.ItemDataRole.UserRole)
+        if event.type() == QEvent.Type.ToolTip and r and r.get("path"):
+            sec_l, plays_l = self._listened(r["path"])
+            from PySide6.QtWidgets import QToolTip
+            h, m = int(sec_l // 3600), int(sec_l % 3600 // 60)
+            spent = (f"{h} ч {m} мин" if h else f"{m} мин") if sec_l >= 60 else ("меньше минуты" if sec_l else "ещё не слушал")
+            QToolTip.showText(event.globalPos(), f"Слушал: {spent}" + (f" · {plays_l} раз" if plays_l else "") +
+                              f"\n{r['path']}", view)
+            return True
+        return super().helpEvent(event, view, option, index)
 
     def paint(self, p, opt, index):
         r = index.data(Qt.ItemDataRole.UserRole)
@@ -612,6 +638,34 @@ class TrackDelegate(QStyledItemDelegate):
             p.setPen(pen)
             fm = QFontMetrics(f)
             p.drawText(col[key], align, fm.elidedText(s or "", Qt.TextElideMode.ElideRight, int(col[key].width())))
+        # квадратик «сколько слушал»: заполнен по времени относительно самого слушаемого в этом списке
+        sec_l, plays_l = self._listened(r["path"])
+        mx = self._max_for(index.model())
+        if mx > 0:
+            q = col["meter"]
+            lvl = min(1.0, sec_l / mx) if sec_l else 0.0
+            p.setPen(QPen(QColor(30, 60, 110) if cur else QColor(127, 152, 196, 110), 1.2))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawPolygon(skew_poly(q, 5))
+            if lvl > 0:
+                fill = QRectF(q.left(), q.bottom() - q.height() * max(0.18, lvl), q.width(), q.height() * max(0.18, lvl))
+                g = QLinearGradient(fill.topLeft(), fill.bottomLeft())
+                g.setColorAt(0, WHITE if lvl > 0.6 else ICE)
+                g.setColorAt(1, CYAN if not cur else CYAN_D)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(g)
+                p.save()
+                path_q = QPainterPath()
+                path_q.addPolygon(skew_poly(q, 5))
+                p.setClipPath(path_q)
+                p.drawRect(fill)
+                p.restore()
+                if lvl > 0.66:                            # самые любимые — светятся
+                    glow = QColor(CYAN)
+                    glow.setAlpha(int(90 * lvl))
+                    p.setPen(QPen(glow, 3))
+                    p.setBrush(Qt.BrushStyle.NoBrush)
+                    p.drawPolygon(skew_poly(q.adjusted(-2, -2, 2, 2), 5))
         text("title", r["title"], pfont(15, weight=QFont.Weight.Bold), ink)
         text("artist", r["artist"], pfont(13, bold=False), dim)
         text("album", r["album"], pfont(13, bold=False), dim)

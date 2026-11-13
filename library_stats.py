@@ -35,77 +35,94 @@ def _scroll():
 
 # ---------------------------------------------------------------- графики
 class DayChart(QWidget):
-    """Минуты музыки по дням — скошенные столбики, как шкалы в P3R."""
+    """Столбики «сколько слушал» — скошенные, как шкалы в P3R. Клик по столбику — внутрь (год → месяц → неделя → день)."""
+    picked = Signal(int)
 
     def __init__(self):
         super().__init__()
-        self.setMinimumHeight(220)
+        self.setMinimumHeight(230)
         self.setMouseTracking(True)
-        self.days = []                 # [(date, sec)]
+        self.items = []                # [{"label", "sec", "tip", "weekend", "child"}]
+        self.sel = -1
         self.hover = -1
 
-    def set_days(self, days):
-        self.days = days
+    def set_items(self, items, sel=-1):
+        self.items, self.sel = items, sel
         self.update()
 
     def _bars(self):
-        n = max(1, len(self.days))
-        left, right, top, bottom = 46, self.width() - 10, 14, self.height() - 28
+        n = max(1, len(self.items))
+        left, right, top, bottom = 46, self.width() - 10, 14, self.height() - 30
         step = (right - left) / n
-        bw = max(3.0, step * 0.72)
-        mx = max([s for _d, s in self.days] + [60])
+        bw = max(3.0, min(step * 0.72, 120))
+        mx = max([it["sec"] for it in self.items] + [60])
         out = []
-        for i, (d, s) in enumerate(self.days):
-            h = (bottom - top) * (s / mx)
-            out.append(QRectF(left + i * step + (step - bw) / 2, bottom - h, bw, h))
+        for i, it in enumerate(self.items):
+            h = (bottom - top) * (it["sec"] / mx)
+            out.append((QRectF(left + i * step + (step - bw) / 2, bottom - h, bw, h),
+                        QRectF(left + i * step, top, step, bottom - top)))
         return out, mx, top, bottom, left, right
 
-    def mouseMoveEvent(self, e):
+    def _at(self, x):
         bars, *_ = self._bars()
-        x = e.position().x()
-        h = next((i for i, r in enumerate(bars) if r.left() - 2 <= x <= r.right() + 2), -1)
+        return next((i for i, (_r, col) in enumerate(bars) if col.left() <= x <= col.right()), -1)
+
+    def mouseMoveEvent(self, e):
+        h = self._at(e.position().x())
         if h != self.hover:
             self.hover = h
             self.update()
             if h >= 0:
-                d, s = self.days[h]
-                QToolTip.showText(e.globalPosition().toPoint(),
-                                  f"{WD[d.weekday()]}, {d.day} {MONTHS[d.month - 1]}: {human_time(s)}", self)
+                it = self.items[h]
+                sfx("hover")
+                QToolTip.showText(e.globalPosition().toPoint(), it["tip"] + ("\nклик — подробнее" if it.get("child") else ""), self)
+        self.setCursor(Qt.CursorShape.PointingHandCursor if h >= 0 and self.items[h].get("child")
+                       else Qt.CursorShape.ArrowCursor)
 
     def leaveEvent(self, _e):
         self.hover = -1
         self.update()
 
+    def mousePressEvent(self, e):
+        h = self._at(e.position().x())
+        if h >= 0 and self.items[h].get("child"):
+            sfx("select")
+            self.picked.emit(h)
+
     def paintEvent(self, _e):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         bars, mx, top, bottom, left, right = self._bars()
-        # сетка: минуты
         p.setFont(pfont(11, bold=False))
         for k in range(0, 5):
             y = bottom - (bottom - top) * k / 4
             p.setPen(QPen(QColor(255, 255, 255, 22), 1))
             p.drawLine(QPointF(left, y), QPointF(right, y))
             p.setPen(DIM)
+            v = mx * k / 4
             p.drawText(QRectF(0, y - 8, left - 6, 16), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                       f"{int(mx * k / 4 / 60)}м")
-        for i, r in enumerate(bars):
-            d, s = self.days[i]
-            g = QLinearGradient(r.topLeft(), r.bottomLeft())
+                       f"{v / 3600:.0f}ч" if mx >= 4 * 3600 else f"{int(v / 60)}м")
+        many = len(self.items) > 16
+        for i, (r, col) in enumerate(bars):
+            it = self.items[i]
             hot = i == self.hover
-            g.setColorAt(0, WHITE if hot else ICE)
-            g.setColorAt(1, CYAN if hot else CYAN_D)
+            chosen = i == self.sel
+            if hot or chosen:                                    # подсветка колонки
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor(47, 211, 255, 40 if chosen else 22))
+                p.drawRect(col)
+            g = QLinearGradient(r.topLeft(), r.bottomLeft())
+            g.setColorAt(0, WHITE if (hot or chosen) else ICE)
+            g.setColorAt(1, CYAN if (hot or chosen) else CYAN_D)
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(g)
             if r.height() > 1:
-                p.drawPolygon(skew_poly(r, min(r.width() * 0.5, 6)))
-            # подписи дней: у недели — все, у месяца — каждый 5-й и понедельники
-            lab = len(self.days) <= 14 or d.day == 1 or (len(self.days) <= 40 and d.weekday() == 0)
-            if lab:
-                p.setFont(pfont(10, bold=d.weekday() >= 5))
-                p.setPen(CYAN if d.weekday() >= 5 else DIM)
-                txt = WD[d.weekday()] if len(self.days) <= 7 else f"{d.day}.{d.month:02d}"
-                p.drawText(QRectF(r.center().x() - 24, bottom + 4, 48, 18), Qt.AlignmentFlag.AlignCenter, txt)
+                p.drawPolygon(skew_poly(r, min(r.width() * 0.4, 8)))
+            if not many or i % max(1, len(self.items) // 12) == 0 or chosen:
+                p.setFont(pfont(11, bold=it.get("weekend", False) or chosen))
+                p.setPen(CYAN if (it.get("weekend") or chosen) else DIM)
+                p.drawText(QRectF(col.left() - 10, bottom + 4, col.width() + 20, 20), Qt.AlignmentFlag.AlignCenter,
+                           it["label"])
         p.end()
 
 
@@ -243,8 +260,18 @@ class StatCard(QWidget):
 
 
 # ---------------------------------------------------------------- страница «Итоги»
+MONTHS_FULL = ["ЯНВАРЬ", "ФЕВРАЛЬ", "МАРТ", "АПРЕЛЬ", "МАЙ", "ИЮНЬ", "ИЮЛЬ", "АВГУСТ", "СЕНТЯБРЬ", "ОКТЯБРЬ",
+               "НОЯБРЬ", "ДЕКАБРЬ"]
+
+
+def _month_end(d):
+    nxt = (d.replace(day=28) + _dt.timedelta(days=4)).replace(day=1)
+    return nxt - _dt.timedelta(days=1)
+
+
 class StatsPage(QWidget):
-    PERIODS = (("week", "НЕДЕЛЯ", 7), ("month", "МЕСЯЦ", 30), ("year", "ГОД", 365), ("all", "ВСЁ ВРЕМЯ", 0))
+    """Итоги: всё время → год → месяц → неделя → день (клик по столбику — глубже, «крошки» сверху — назад)."""
+    PERIODS = (("week", "НЕДЕЛЯ"), ("month", "МЕСЯЦ"), ("year", "ГОД"), ("all", "ВСЁ ВРЕМЯ"))
 
     def __init__(self, win):
         super().__init__()
@@ -259,13 +286,17 @@ class StatsPage(QWidget):
         head.addWidget(t)
         head.addStretch(1)
         self.chips = {}
-        for key, name, _d in self.PERIODS:
+        for key, name in self.PERIODS:
             c = P3Chip(name)
             c.clicked.connect(lambda _=False, k=key: self.set_period(k))
             head.addWidget(c)
             self.chips[key] = c
         outer.addLayout(head)
+        self.crumbs = QHBoxLayout()
+        self.crumbs.setSpacing(2)
+        outer.addLayout(self.crumbs)
         sc = _scroll()
+        self.sc = sc
         body = QWidget()
         lay = QVBoxLayout(body)
         lay.setContentsMargins(0, 0, 18, 24)
@@ -278,7 +309,7 @@ class StatsPage(QWidget):
         self.c_time = StatCard("СЛУШАЛ")
         self.c_tracks = StatCard("ТРЕКОВ")
         self.c_artists = StatCard("ИСПОЛНИТЕЛЕЙ")
-        self.c_best = StatCard("САМЫЙ МУЗЫКАЛЬНЫЙ ДЕНЬ")
+        self.c_best = StatCard("САМЫЙ МУЗЫКАЛЬНЫЙ")
         for c in (self.c_time, self.c_tracks, self.c_artists, self.c_best):
             cards.addWidget(c)
         lay.addLayout(cards)
@@ -291,12 +322,13 @@ class StatsPage(QWidget):
             return lb
         self.days_title = sec("ПО ДНЯМ")
         self.chart = DayChart()
+        self.chart.picked.connect(self._drill)
         lay.addWidget(self.chart)
         sec("ТОП ИСПОЛНИТЕЛЕЙ")
         self.artists = RankList(win, round_art=True)
         self.artists.clicked.connect(self._open_artist)
         lay.addWidget(self.artists)
-        sec("ТОП ТРЕКОВ")
+        self.tracks_title = sec("ТОП ТРЕКОВ")
         self.tracks = RankList(win)
         self.tracks.clicked.connect(lambda r: r.get("path") and self.win.play_paths(
             [x["path"] for x in self.tracks.rows if x.get("path")], r["path"]))
@@ -309,10 +341,131 @@ class StatsPage(QWidget):
         row.addStretch(1)
         lay.addLayout(row)
         lay.addStretch(1)
+        self.level, self.anchor = None, None
+        self._items = []
 
+    # ---------- уровни
     def set_period(self, key):
         self.o.cfg["stats_period"] = key
+        today = _dt.date.today()
+        if key == "week":
+            self.level, self.anchor = "week", today - _dt.timedelta(days=today.weekday())
+        elif key == "month":
+            self.level, self.anchor = "month", today.replace(day=1)
+        elif key == "year":
+            self.level, self.anchor = "year", today.replace(month=1, day=1)
+        else:
+            self.level, self.anchor = "all", None
         self.refresh()
+
+    def _go(self, level, anchor):
+        self.level, self.anchor = level, anchor
+        self.refresh()
+
+    def _drill(self, i):
+        it = self._items[i]
+        self._go(*it["child"])
+
+    def _range(self):
+        """[начало, конец] текущего уровня (даты включительно)."""
+        lv, a = self.level, self.anchor
+        today = _dt.date.today()
+        if lv == "all":
+            days = self._days()
+            first = min([_dt.date.fromisoformat(d) for d in days] or [today])
+            return first, today
+        if lv == "year":
+            return a, a.replace(month=12, day=31)
+        if lv == "month":
+            return a, _month_end(a)
+        if lv == "week":
+            return a, a + _dt.timedelta(days=6)
+        return a, a                                         # день
+
+    def _days(self):
+        st = getattr(self.o, "stats", None)
+        return (st.data.get("days") or {}) if st is not None else {}
+
+    def _sum(self, d0, d1):
+        days = self._days()
+        tot, d = 0.0, d0
+        while d <= d1:
+            tot += float(days.get(d.isoformat(), 0.0))
+            d += _dt.timedelta(days=1)
+        return tot
+
+    def _build_items(self):
+        lv, a = self.level, self.anchor
+        today = _dt.date.today()
+        items, sel = [], -1
+        if lv == "all":
+            first, _ = self._range()
+            for y in range(first.year, today.year + 1):
+                y0 = _dt.date(y, 1, 1)
+                s = self._sum(y0, _dt.date(y, 12, 31))
+                items.append({"label": str(y), "sec": s, "tip": f"{y} год: {human_time(s)}", "child": ("year", y0)})
+            title = "ПО ГОДАМ"
+        elif lv == "year":
+            for m in range(1, 13):
+                m0 = _dt.date(a.year, m, 1)
+                s = self._sum(m0, _month_end(m0))
+                items.append({"label": MONTHS[m - 1], "sec": s, "tip": f"{MONTHS_FULL[m - 1].capitalize()} {a.year}: "
+                              f"{human_time(s)}", "child": ("month", m0)})
+            title = f"{a.year} · ПО МЕСЯЦАМ"
+        elif lv == "month":
+            end = _month_end(a)
+            wk = a - _dt.timedelta(days=a.weekday())
+            while wk <= end:
+                w0, w1 = max(wk, a), min(wk + _dt.timedelta(days=6), end)
+                s = self._sum(w0, w1)
+                items.append({"label": f"{w0.day}–{w1.day}", "sec": s,
+                              "tip": f"{w0.day}–{w1.day} {MONTHS[a.month - 1]}: {human_time(s)}", "child": ("week", wk)})
+                wk += _dt.timedelta(days=7)
+            title = f"{MONTHS_FULL[a.month - 1]} {a.year} · ПО НЕДЕЛЯМ"
+        else:                                               # неделя или день — 7 дней
+            wk = a - _dt.timedelta(days=a.weekday())
+            for k in range(7):
+                d = wk + _dt.timedelta(days=k)
+                s = self._sum(d, d)
+                items.append({"label": f"{WD[k]} {d.day}", "sec": s, "weekend": k >= 5,
+                              "tip": f"{WD[k]}, {d.day} {MONTHS[d.month - 1]}: {human_time(s)}",
+                              "child": ("day", d) if d <= today else None})
+                if lv == "day" and d == a:
+                    sel = k
+            title = f"НЕДЕЛЯ {wk.day} {MONTHS[wk.month - 1]} – {(wk + _dt.timedelta(days=6)).day} " \
+                    f"{MONTHS[(wk + _dt.timedelta(days=6)).month - 1]} · ПО ДНЯМ"
+        return items, sel, title
+
+    def _crumbs(self):
+        while self.crumbs.count():
+            it = self.crumbs.takeAt(0)
+            w = it.widget()
+            if w is not None:
+                w.hide()
+                w.setParent(None)
+                w.deleteLater()
+        lv, a = self.level, self.anchor
+        chain = [("ВСЁ ВРЕМЯ", ("all", None))]
+        if lv in ("year", "month", "week", "day"):
+            chain.append((str(a.year), ("year", a.replace(month=1, day=1))))
+        if lv in ("month", "week", "day"):
+            chain.append((MONTHS_FULL[a.month - 1], ("month", a.replace(day=1))))
+        if lv in ("week", "day"):
+            wk = a - _dt.timedelta(days=a.weekday())
+            we = wk + _dt.timedelta(days=6)
+            chain.append((f"{wk.day} {MONTHS[wk.month - 1]} – {we.day} {MONTHS[we.month - 1]}", ("week", wk)))
+        if lv == "day":
+            chain.append((f"{WD[a.weekday()]}, {a.day} {MONTHS[a.month - 1]}", ("day", a)))
+        for i, (text, target) in enumerate(chain):
+            if i:
+                arrow = QLabel("›")
+                arrow.setObjectName("sec")
+                self.crumbs.addWidget(arrow)
+            b = P3Chip(text)
+            b.setChecked(i == len(chain) - 1)
+            b.clicked.connect(lambda _=False, t=target: self._go(*t))
+            self.crumbs.addWidget(b)
+        self.crumbs.addStretch(1)
 
     def _artist_of(self, path, t):
         it = self.win.items.get(path)
@@ -323,89 +476,105 @@ class StatsPage(QWidget):
         ga, _gt = libmod.guess_from_name(path)
         return ga or libmod.UNKNOWN_ARTIST
 
+    def _title_of(self, path, t):
+        if path.startswith("radio:"):
+            return t.get("title") or path[6:]
+        it = self.win.items.get(path)
+        if it is not None:
+            return libmod.track_view(path, it)[0]
+        return t.get("title") or libmod.guess_from_name(path)[1]
+
     def refresh(self):
-        key = self.o.cfg.get("stats_period", "month")
+        if self.level is None:
+            self.set_period(self.o.cfg.get("stats_period", "month"))
+            return
+        top_key = {"week": "week", "month": "month", "year": "year", "all": "all"}.get(self.level)
         for k, c in self.chips.items():
-            c.setChecked(k == key)
-        n = dict((k, d) for k, _nm, d in self.PERIODS)[key]
+            c.setChecked(k == top_key and self._is_current())
+        self._crumbs()
         st = getattr(self.o, "stats", None)
         data = st.data if st is not None else {}
         tracks = data.get("tracks") or {}
-        days_sec = data.get("days") or {}
         daily = data.get("daily") or {}
-        today = _dt.date.today()
-        if n:
-            start = today - _dt.timedelta(days=n - 1)
-        else:
-            start = min([_dt.date.fromisoformat(d) for d in days_sec] or [today])
-        # по дням (для «года» и «всего» — по неделям, чтобы столбики не были нитками)
-        span = (today - start).days + 1
-        days = []
-        if span <= 62:
-            for k in range(span):
-                d = start + _dt.timedelta(days=k)
-                days.append((d, float(days_sec.get(d.isoformat(), 0.0))))
-            self.days_title.setText("ПО ДНЯМ")
-        else:
-            wk = start - _dt.timedelta(days=start.weekday())
-            while wk <= today:
-                s = sum(float(days_sec.get((wk + _dt.timedelta(days=j)).isoformat(), 0.0)) for j in range(7))
-                days.append((wk, s))
-                wk += _dt.timedelta(days=7)
-            self.days_title.setText("ПО НЕДЕЛЯМ")
-        self.chart.set_days(days)
+        items, sel, title = self._build_items()
+        self._items = items
+        self.chart.set_items(items, sel)
+        self.days_title.setText(title + ("  ·  клик по столбику — подробнее" if any(i.get("child") for i in items) else ""))
 
-        # что слушал за период: по трекам
+        d0, d1 = self._range()
         per = {}
-        if n:
-            for k in range(n):
-                for path, d in (daily.get((today - _dt.timedelta(days=k)).isoformat()) or {}).items():
-                    v = per.setdefault(path, [0.0, 0])
-                    v[0] += float(d.get("s", 0.0))
-                    v[1] += int(d.get("p", 0))
-        else:
+        if self.level == "all":
             per = {p: [float(t.get("sec") or 0), int(t.get("plays") or 0)] for p, t in tracks.items()}
+        else:
+            d = d0
+            while d <= d1:
+                for path, x in (daily.get(d.isoformat()) or {}).items():
+                    v = per.setdefault(path, [0.0, 0])
+                    v[0] += float(x.get("s", 0.0))
+                    v[1] += int(x.get("p", 0))
+                d += _dt.timedelta(days=1)
         per = {p: v for p, v in per.items() if v[0] >= 5}
-        total = sum(float(days_sec.get((start + _dt.timedelta(days=k)).isoformat(), 0.0)) for k in range(span))
+        total = self._sum(d0, d1)
+        span = (d1 - d0).days + 1
         arts = {}
-        for path, (s, pl) in per.items():
+        for path, (sc, pl) in per.items():
             a = self._artist_of(path, tracks.get(path) or {})
-            v = arts.setdefault(a, [0.0, 0, path])
-            v[0] += s
-            v[1] += pl
-        best = max(days, key=lambda x: x[1]) if days else None
-        self.c_time.set(human_time(total), f"в среднем {human_time(total / max(1, span))} в день")
+            v = arts.setdefault(a, {"sec": 0.0, "plays": 0, "tracks": []})
+            v["sec"] += sc
+            v["plays"] += pl
+            v["tracks"].append((sc, path))
+        self.c_time.set(human_time(total), f"в среднем {human_time(total / max(1, span))} в день" if span > 1 else "за этот день")
         self.c_tracks.set(str(len(per)), f"{sum(v[1] for v in per.values())} прослушиваний")
         self.c_artists.set(str(len(arts)), "разных")
-        if best and best[1] > 0 and span <= 62:
-            d = best[0]
-            self.c_best.set(f"{d.day} {MONTHS[d.month - 1]}", human_time(best[1]))
-        elif best and best[1] > 0:
-            self.c_best.set(f"неделя {best[0].day} {MONTHS[best[0].month - 1]}", human_time(best[1]))
+        best = max(items, key=lambda x: x["sec"]) if items else None
+        if best and best["sec"] > 0:
+            self.c_best.set(best["label"], human_time(best["sec"]))
         else:
             self.c_best.set("—", "")
-        top_a = sorted(arts.items(), key=lambda kv: -kv[1][0])[:10]
-        self.artists.set_rows([{"title": a, "artist": a, "sec": v[0], "sub": f"{v[1]} прослушиваний",
-                                "cover_path": v[2]} for a, v in top_a])
-        top_t = sorted(per.items(), key=lambda kv: -kv[1][0])[:10]
         rows = []
-        for path, (s, pl) in top_t:
+        for a, v in sorted(arts.items(), key=lambda kv: -kv[1]["sec"])[:10]:
+            v["tracks"].sort(reverse=True)
+            names = [self._title_of(p, tracks.get(p) or {}) for _s, p in v["tracks"][:3]]
+            rows.append({"title": a, "artist": a, "sec": v["sec"], "cover_path": v["tracks"][0][1],
+                         "sub": f"{v['plays']} раз · чаще всего: " + ", ".join(names),
+                         "paths": [p for _s, p in v["tracks"]]})
+        self.artists.set_rows(rows)
+        self.tracks_title.setText("ЧТО СЛУШАЛ В ЭТОТ ДЕНЬ" if self.level == "day" else "ТОП ТРЕКОВ")
+        trows = []
+        for path, (sc, pl) in sorted(per.items(), key=lambda kv: -kv[1][0])[:(30 if self.level == "day" else 15)]:
             t = tracks.get(path) or {}
-            if path.startswith("radio:"):
-                title, artist = (t.get("title") or path[6:]), (t.get("artist") or "радио")
-            else:
-                it = self.win.items.get(path, {})
-                title, artist, _al = libmod.track_view(path, it) if it else (t.get("title") or os.path.basename(path),
-                                                                             t.get("artist") or "", "")
-            rows.append({"title": title, "sub": f"{artist} · {pl} раз", "sec": s,
-                         "cover_path": None if path.startswith("radio:") else path,
-                         "path": path if os.path.isfile(path) else None})
-        self.tracks.set_rows(rows)
+            artist = self._artist_of(path, t) if not path.startswith("radio:") else (t.get("artist") or "радио")
+            trows.append({"title": self._title_of(path, t), "sub": f"{artist} · {pl} раз", "sec": sc,
+                          "cover_path": None if path.startswith("radio:") else path,
+                          "path": path if os.path.isfile(path) else None})
+        self.tracks.set_rows(trows)
+
+    def _is_current(self):
+        today = _dt.date.today()
+        lv, a = self.level, self.anchor
+        return (lv == "all" or (lv == "year" and a.year == today.year)
+                or (lv == "month" and a == today.replace(day=1))
+                or (lv == "week" and a == today - _dt.timedelta(days=today.weekday())))
 
     def _open_artist(self, r):
         ar = next((a for a in self.win.artists if a["name"] == r["artist"]), None)
-        if ar:
+        if ar and r["artist"] != libmod.UNKNOWN_ARTIST:
             self.win.open_artist(ar)
+        elif r.get("paths"):                                # «неизвестный» — сразу его треки
+            paths = [p for p in r["paths"] if os.path.isfile(p)]
+            if paths:
+                self.win.play_paths(paths, paths[0])
+
+    def keyPressEvent(self, e):
+        if e.key() in (Qt.Key.Key_Backspace, Qt.Key.Key_Escape) and self.level not in ("all", None):
+            up = {"day": "week", "week": "month", "month": "year", "year": "all"}[self.level]
+            a = self.anchor
+            anchor = {"week": a - _dt.timedelta(days=a.weekday()) if a else None, "month": a.replace(day=1) if a else None,
+                      "year": a.replace(month=1, day=1) if a else None, "all": None}[up]
+            sfx("back")
+            self._go(up, anchor)
+            return
+        super().keyPressEvent(e)
 
     def showEvent(self, e):
         self.refresh()
