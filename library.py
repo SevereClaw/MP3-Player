@@ -209,11 +209,12 @@ def _entry(p, size, mtime):
 
 
 AUTO_RETRY = 30 * 86400            # не нашёлся исполнитель — снова искать через месяц
+AUTO_VER = 2                       # поиск стал умнее — ненайденное поискать заново сразу
 
 
 def _keep_auto(new, old):
     """Файл перечитали — не терять исполнителя, найденного в интернете (и отказ от него)."""
-    for k in ("ag", "agt", "agx"):
+    for k in ("ag", "agt", "agx", "agv"):
         if old and k in old and k not in new:
             new[k] = old[k]
     return new
@@ -411,7 +412,8 @@ class Library:
         with self.lock:
             return [p for p, it in self.items.items()
                     if not it.get("a") and not it.get("ag") and not it.get("agx")
-                    and now - (it.get("agt") or 0) > AUTO_RETRY and not guess_from_name(p)[0]]
+                    and (now - (it.get("agt") or 0) > AUTO_RETRY or it.get("agv") != AUTO_VER)
+                    and not guess_from_name(p)[0]]
 
     def find_artists(self, lookup=None, enabled=lambda: True, done=None):
         """В фоне найти в интернете исполнителей для треков без исполнителя.
@@ -445,7 +447,7 @@ class Library:
                         it = self.items.get(p)
                         if it is None:
                             continue
-                        it["agt"] = int(time.time())
+                        it["agt"], it["agv"] = int(time.time()), AUTO_VER
                         if name and not it.get("agx"):
                             it["ag"] = str(name).strip()
                             found += 1

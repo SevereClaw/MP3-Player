@@ -171,7 +171,9 @@ def find_artist(title, duration=0.0, album="", name=""):
     """Имя исполнителя для трека без тега «исполнитель» или None. Нет сети — Offline.
 
     Чтобы не приписать песню однофамильцу, одного названия мало — должно совпасть ещё что-то:
-    длительность (±3 с), альбом из тегов или имя исполнителя в имени файла."""
+    длительность (±3 с), альбом из тегов или имя исполнителя в имени файла. Если так не нашлось
+    (игровой рип, другая версия — длительность гуляет), берём самый популярный трек с точно таким
+    же названием: ошибётся — пользователь поправит сам."""
     title = (title or "").strip()
     if len(norm(title)) < 2:
         return None
@@ -190,12 +192,22 @@ def find_artist(title, duration=0.0, album="", name=""):
             return True
         return bool(album) and similar(r_album, album)
 
-    def deezer(q):
+    def loose(r_title, r_artist, r_dur, r_album):
+        """Запасной вариант: название слово в слово, длительность — примерно (±20 %)."""
+        if not r_artist or _FAKE.search(f"{r_title} | {r_artist} | {r_album or ''}"):
+            return False
+        ct = norm(title).replace(" ", "")
+        if len(ct) < 5 or norm(r_title).replace(" ", "") != ct:
+            return False
+        return not (duration and r_dur) or abs(float(r_dur) - duration) <= duration * 0.2
+
+    def deezer(q, test=None):
+        test = test or ok
         d = _get_json("https://api.deezer.com/search?" + urllib.parse.urlencode({"q": q, "limit": 40}))
         best = None                                          # из подходящих — самый популярный (оригинал, а не перепевка)
         for r in d.get("data", []):
             a = (r.get("artist") or {}).get("name")
-            if ok(r.get("title"), a, r.get("duration"), (r.get("album") or {}).get("title")):
+            if test(r.get("title"), a, r.get("duration"), (r.get("album") or {}).get("title")):
                 if best is None or (r.get("rank") or 0) > best[0]:
                     best = (r.get("rank") or 0, a)
         return best[1] if best else None
@@ -216,4 +228,6 @@ def find_artist(title, duration=0.0, album="", name=""):
             lambda: itunes("US")]
     if _cjk(title):
         srcs.insert(2, lambda: itunes("JP"))
+    if not _FAKE.search(f"{title} {name}"):
+        srcs.append(lambda: deezer(f'track:"{title}"', loose))
     return _try(srcs)

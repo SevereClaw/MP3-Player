@@ -45,12 +45,15 @@ def fake_json(url, timeout=8):
 
 oa._get_json = fake_json
 check("по названию и длительности", oa.find_artist("Unravel", 238.4), "TK from 凛として時雨")
-check("длительность не та — не подставлять", oa.find_artist("Unravel", 180.0), None)
-check("без длительности и альбома — не гадать", oa.find_artist("Unravel"), None)
+check("длительность совсем не та — не подставлять", oa.find_artist("Unravel", 150.0), None)
+check("короткое название без длительности — не гадать", oa.find_artist("Love"), None)
 check("по названию и альбому", oa.find_artist("unravel", 0, "Fantastic Magic"), "TK from 凛として時雨")
 check("«Love» — это не «Lovely Day»", oa.find_artist("Love", 200), None)
 check("исполнитель в имени файла", oa.find_artist("kino_gruppa krovi", 0, "", "Кино_Группа крови"), "Кино")
 check("оригинал, а не караоке и не перепевка", oa.find_artist("Bohemian Rhapsody", 354), "Queen")
+check("длительность гуляет (рип из игры) — самый популярный с тем же названием",
+      oa.find_artist("Bohemian Rhapsody", 340), "Queen")
+check("но не совсем другая длина", oa.find_artist("Bohemian Rhapsody", 120), None)
 check("пустое название", oa.find_artist("", 200), None)
 
 

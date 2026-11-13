@@ -1380,7 +1380,7 @@ class Mp3Widget(QWidget):
             a, t = stem.split(" - ", 1)
             self.artist, self.title = a.strip(), t.strip()
         else:
-            self.artist, self.title = "", stem
+            self.artist, self.title = self.library.auto_artist(path), stem     # найден в интернете
         self.album = ""
         self._cover = None
         self._np_cover = ("", "")

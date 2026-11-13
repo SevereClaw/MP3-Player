@@ -1333,7 +1333,7 @@ class NowPlaying(QWidget):
         x = r.width() * 0.48
         w = r.width() - x - 40
         title = getattr(o, "title", "") or "Ничего не играет"
-        artist = getattr(o, "artist", "") or ""
+        artist = self.win.now_artist()
         album = getattr(o, "album", "") or ""
         p.setFont(pfont(13))
         p.setPen(CYAN)
@@ -1584,9 +1584,14 @@ class IconButton(QPushButton):
 
 # ---------------------------------------------------------------- нижняя панель
 class PlayerBar(QWidget):
+    SEEK_MAX = 10000                 # мелкие деления — ползунок идёт без скачков
+
     def __init__(self, win):
         super().__init__()
         self.win = win
+        self._pos_timer = QTimer(self, interval=33)          # ползунок и время — 30 раз в секунду на любой странице
+        self._pos_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._pos_timer.timeout.connect(self.sync_pos)
         self.setFixedHeight(92)
         lay = QHBoxLayout(self)
         lay.setContentsMargins(18, 10, 22, 10)
@@ -1630,7 +1635,7 @@ class PlayerBar(QWidget):
         self.tot = QLabel("0:00")
         self.tot.setObjectName("time")
         self.seek = QSlider(Qt.Orientation.Horizontal)
-        self.seek.setRange(0, 1000)
+        self.seek.setRange(0, self.SEEK_MAX)
         self.seek.sliderReleased.connect(self._seek)
         self._dragging = False
         self.seek.sliderPressed.connect(lambda: setattr(self, "_dragging", True))
@@ -1657,23 +1662,17 @@ class PlayerBar(QWidget):
         self._dragging = False
         d = self.win.owner.player.duration()
         if d > 0:
-            self.win.owner.player.setPosition(int(d * self.seek.value() / 1000))
+            self.win.owner.player.setPosition(int(d * self.seek.value() / self.SEEK_MAX))
 
     def sync(self):
         o = self.win.owner
         fmw = QFontMetrics(pfont(16))
         self.t.setText(fmw.elidedText(getattr(o, "title", "") or "—", Qt.TextElideMode.ElideRight, 215))
-        self.a.setText(QFontMetrics(pfont(13, bold=False)).elidedText(getattr(o, "artist", "") or "",
+        self.a.setText(QFontMetrics(pfont(13, bold=False)).elidedText(self.win.now_artist(),
                                                                       Qt.TextElideMode.ElideRight, 215))
         self.play.playing = o.is_playing()
         self.play.update()
-        pos, dur = o.player.position(), o.player.duration()
-        self.cur.setText(fmt_ms(pos))
-        self.tot.setText(fmt_ms(dur))
-        if not self._dragging:
-            self.seek.blockSignals(True)
-            self.seek.setValue(int(1000 * pos / dur) if dur > 0 else 0)
-            self.seek.blockSignals(False)
+        self.sync_pos()
         if not self.vol.isSliderDown():
             self.vol.blockSignals(True)
             self.vol.setValue(int(round(o.player.volume() * 100)))
@@ -1689,6 +1688,28 @@ class PlayerBar(QWidget):
             else:
                 pm = cover_pixmap(self.win.covers, path, 66, getattr(o, "title", ""))
             self.art.setPixmap(pm)
+
+    def showEvent(self, e):
+        self._pos_timer.start()
+        super().showEvent(e)
+
+    def hideEvent(self, e):
+        self._pos_timer.stop()
+        super().hideEvent(e)
+
+    def sync_pos(self):
+        o = self.win.owner
+        pos, dur = o.player.position(), o.player.duration()
+        sp = getattr(o, "smooth_pos", None)                 # движок отдаёт позицию рывками — берём сглаженную
+        sm = sp() if callable(sp) else None
+        if isinstance(sm, (int, float)):
+            pos = max(0, min(sm, dur)) if dur > 0 else sm
+        self.cur.setText(fmt_ms(pos))
+        self.tot.setText(fmt_ms(dur))
+        if not self._dragging and not self.seek.isSliderDown():
+            self.seek.blockSignals(True)
+            self.seek.setValue(int(self.SEEK_MAX * pos / dur) if dur > 0 else 0)
+            self.seek.blockSignals(False)
 
     def paintEvent(self, _e):
         p = QPainter(self)
@@ -2334,6 +2355,7 @@ class LibraryWindow(QWidget):
         root.addLayout(right, 1)
 
         self.timer = QTimer(self, interval=80)
+        self.timer.setTimerType(Qt.TimerType.PreciseTimer)     # обычный таймер Windows дёргается (шаг ~15 мс)
         self.timer.timeout.connect(self.tick)
         self._last_path = None
         self._toast = QLabel(self)
@@ -2711,6 +2733,15 @@ class LibraryWindow(QWidget):
         img.save(f, "JPG", 90)
         return img
 
+    def now_artist(self):
+        """Исполнитель текущего трека; в тегах пусто — тот, что нашёлся в интернете."""
+        o = self.owner
+        a = getattr(o, "artist", "") or ""
+        if a:
+            return a
+        path = getattr(o, "loaded_path", None)
+        return self.lib.auto_artist(path) if isinstance(path, str) and path else ""
+
     def _online_on(self):
         return getattr(self.owner, "cfg", {}).get("online_art", True)
 
@@ -2720,7 +2751,7 @@ class LibraryWindow(QWidget):
         import online_art as oa
         it = self.lib.items.get(path) or {}
         ga, gt = libmod.guess_from_name(path)
-        artist, album, title = it.get("a") or ga, it.get("al") or "", it.get("t") or gt
+        artist, album, title = it.get("a") or ga or it.get("ag", ""), it.get("al") or "", it.get("t") or gt
         if album:
             key = ("al", libmod.norm(artist), libmod.norm(album))
             return self._online_cached(key, lambda: oa.album_cover_url(artist, album))
@@ -2947,6 +2978,8 @@ class LibraryWindow(QWidget):
         if not self.lib.scanning and len(self.lib) != self._built_n:
             self.rebuild()
         if self.lib.auto_version != self._auto_v:           # нашлись исполнители в интернете
+            self.covers.forget_missing()                    # теперь по исполнителю найдётся и обложка
+            self.bar._art_key = None
             self.rebuild(force=True)
 
     def open(self):
