@@ -14,7 +14,7 @@ import time
 from PySide6.QtCore import (Qt, QTimer, QRect, QRectF, QPoint, QPointF, QSize, QObject, Signal, QModelIndex,
                             QAbstractListModel, QBuffer, QIODevice, QEvent)
 from PySide6.QtGui import (QPainter, QColor, QFont, QFontMetrics, QPixmap, QImage, QPolygonF, QLinearGradient,
-                           QPainterPath, QPen, QBrush, QIcon, QTransform)
+                           QPainterPath, QPen, QBrush, QIcon, QTransform, QRadialGradient)
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QListView, QFrame,
                                QStackedWidget, QStyledItemDelegate, QStyle, QSlider, QAbstractItemView,
                                QPushButton, QMenu, QSizePolicy, QApplication)
@@ -1388,24 +1388,95 @@ class NowPlaying(QWidget):
                                                             Qt.TransformationMode.SmoothTransformation))
         return self._blur
 
+    @staticmethod
+    def _palette(img):
+        """Два цвета обложки: самый сочный (акцент) и средний (общий тон)."""
+        small = img.scaled(12, 12, Qt.AspectRatioMode.IgnoreAspectRatio,
+                           Qt.TransformationMode.SmoothTransformation).convertToFormat(QImage.Format.Format_RGB32)
+        best, score, rs, gs, bs = None, -1.0, 0, 0, 0
+        for y in range(small.height()):
+            for x in range(small.width()):
+                c = small.pixelColor(x, y)
+                rs, gs, bs = rs + c.red(), gs + c.green(), bs + c.blue()
+                sc = c.hsvSaturationF() * (0.35 + c.valueF()) * (1.0 if c.valueF() > 0.25 else 0.3)
+                if sc > score:
+                    best, score = c, sc
+        n = max(1, small.width() * small.height())
+        avg = QColor(rs // n, gs // n, bs // n)
+        if best is None or best.hsvSaturationF() < 0.18:        # серая обложка — фирменный голубой
+            accent = QColor(CYAN)
+        else:
+            accent = QColor.fromHsvF(max(0.0, best.hsvHueF()), min(0.85, max(0.5, best.hsvSaturationF())), 0.95)
+        return accent, avg
+
     def _backdrop(self, img):
-        """Фон страницы целиком (градиент + размытая обложка + затемнение) — собирается один раз на трек."""
+        """Фон страницы целиком — собирается один раз на трек, поэтому может быть дорогим:
+        размытая обложка в её же цветах, свечение за обложкой, косые полосы и затемнение под текст."""
         r = self.rect()
         key = (img.cacheKey() if img is not None else 0, r.width(), r.height())
         if key != self._back_key or self._back is None:
             self._back_key = key
-            pm = QPixmap(bg_pixmap(r.width(), r.height()))
-            bl = self._blurred(img)
-            if bl is not None:
-                p = QPainter(pm)
-                p.setOpacity(0.35)
-                p.drawPixmap(0, (r.height() - bl.height()) // 2, bl)
-                p.setOpacity(1.0)
-                veil = QLinearGradient(QPointF(r.topLeft()), QPointF(r.topRight()))
-                veil.setColorAt(0, QColor(6, 19, 49, 120))
-                veil.setColorAt(1, QColor(3, 10, 31, 235))
-                p.fillRect(r, veil)
-                p.end()
+            w, h = max(1, r.width()), max(1, r.height())
+            if img is None:
+                self._back = QPixmap(bg_pixmap(w, h))
+                return self._back
+            accent, avg = self._palette(img)
+            pm = QPixmap(w, h)
+            p = QPainter(pm)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            # 1) основа: тёмный тон обложки, смешанный с фирменным синим
+            def mix(c1, c2, k):
+                return QColor(int(c1.red() * (1 - k) + c2.red() * k), int(c1.green() * (1 - k) + c2.green() * k),
+                              int(c1.blue() * (1 - k) + c2.blue() * k))
+            tone = QColor.fromHsvF(max(0.0, avg.hsvHueF()), min(0.75, avg.hsvSaturationF() + 0.15), 0.26)
+            g = QLinearGradient(0, 0, w, h)
+            g.setColorAt(0, mix(tone, NAVY2, 0.45))
+            g.setColorAt(1, mix(tone, DEEP, 0.8))
+            p.fillRect(0, 0, w, h, g)
+            # 2) сама обложка — сильно размытая (в три приёма, чтобы без квадратов), на весь экран
+            soft = img.scaled(40, 40, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                              Qt.TransformationMode.SmoothTransformation)
+            soft = soft.scaled(160, 160, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            soft = soft.scaled(56, 56, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            side = int(max(w, h) * 1.25)
+            big = soft.scaled(side, side, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            p.setOpacity(0.62)
+            p.drawImage((w - side) // 2, (h - side) // 2, big)           # с запасом: края картинки за экраном
+            p.setOpacity(1.0)
+            # 3) свечение за обложкой — её самый сочный цвет
+            cx, cy = w * 0.25, (h - 132) * 0.5
+            glow = QRadialGradient(QPointF(cx, cy), max(w, h) * 0.48)
+            c0, c1, c2 = QColor(accent), QColor(accent), QColor(accent)
+            c0.setAlpha(120), c1.setAlpha(46), c2.setAlpha(0)
+            glow.setColorAt(0, c0)
+            glow.setColorAt(0.45, c1)
+            glow.setColorAt(1, c2)
+            p.fillRect(0, 0, w, h, glow)
+            # 4) косые полосы, как в меню, — подкрашены цветом обложки
+            p.setPen(Qt.PenStyle.NoPen)
+            for x, ww, al in ((0.56, 0.20, 20), (0.74, 0.07, 30), (0.88, 0.26, 14), (0.08, 0.04, 12)):
+                c = mix(accent, WHITE, 0.25)
+                c.setAlpha(al)
+                p.setBrush(c)
+                x0, wd, sk = w * x, w * ww, h * 0.45
+                p.drawPolygon(QPolygonF([QPointF(x0 + sk, 0), QPointF(x0 + sk + wd, 0),
+                                         QPointF(x0 + wd - sk, h), QPointF(x0 - sk, h)]))
+            # 5) затемнение: справа под текст, снизу под «Мою волну», по краям — виньетка
+            veil = QLinearGradient(0, 0, w, 0)
+            veil.setColorAt(0, QColor(3, 8, 26, 40))
+            veil.setColorAt(0.45, QColor(3, 8, 26, 120))
+            veil.setColorAt(1, QColor(2, 6, 20, 215))
+            p.fillRect(0, 0, w, h, veil)
+            low = QLinearGradient(0, h - 260, 0, h)
+            low.setColorAt(0, QColor(2, 6, 20, 0))
+            low.setColorAt(1, QColor(2, 6, 20, 200))
+            p.fillRect(0, max(0, h - 260), w, 260, low)
+            vig = QRadialGradient(QPointF(w * 0.4, h * 0.45), max(w, h) * 0.75)
+            vig.setColorAt(0.55, QColor(0, 0, 0, 0))
+            vig.setColorAt(1, QColor(0, 0, 0, 150))
+            p.fillRect(0, 0, w, h, vig)
+            p.end()
             self._back = pm
         return self._back
 
