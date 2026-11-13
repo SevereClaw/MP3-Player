@@ -235,6 +235,27 @@ app.sendEvent(w.now, QMouseEvent(QEvent.Type.MouseButtonPress, _c, w.now.mapToGl
 print("волна по клику на обложку:", _wave)
 assert len(_wave) == 2, _wave
 owner.start_wave, owner.wave_active = _sw, _wa
+# ПКМ на «Сейчас играет»: своя картинка и вставленный текст
+_im = QImage(900, 600, QImage.Format.Format_RGB32); _im.fill(QColor(230, 60, 140))
+w.now.set_picture(owner.loaded_path, _im)
+_cc = w.covers.custom(owner.loaded_path)
+print("своя картинка:", None if _cc is None else (_cc.width(), _cc.height()))
+assert _cc is not None and _cc.width() == _cc.height() == 700 and w.now._cover_img() is _cc
+_linked = []
+owner.link_lrc_file = lambda f: _linked.append(f)
+w.now.set_lyrics_text(owner.loaded_path, "[Verse 1]\nпервая строка\n\nвторая строка\nтретья")
+_lrc = open(_linked[0], encoding="utf-8").read()
+print("вставленный текст:", _lrc.replace("\n", " | "))
+assert _lrc.count("[") == 3 and "первая строка" in _lrc and "Verse" not in _lrc, _lrc
+w.now.set_lyrics_text(owner.loaded_path, "[00:01.00]раз\n[00:05.50]два")
+assert open(_linked[1], encoding="utf-8").read().startswith("[00:01.00]раз"), "таймкоды должны остаться как есть"
+for _ in range(45):                                       # эффекты под бит: кольца и частицы
+    __import__("time").sleep(0.03); w.now.repaint()
+print("эффекты под бит: частиц", len(w.now._parts), "колец", len(w.now._rings))
+assert len(w.now._parts) > 5, "частицы должны лететь"
+dump("lib_now_beat.jpg")
+w.now.set_picture(owner.loaded_path, None)
+assert w.covers.custom(owner.loaded_path) is None
 _rep = []                                                 # кнопка повтора: список → трек → выкл
 owner.set_repeat = lambda m: (_rep.append(m), setattr(owner, "repeat", m))
 for _ in range(3):

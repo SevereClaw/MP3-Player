@@ -528,3 +528,36 @@ class Library:
                     scored.append((-score, len(h), p))
         scored.sort()
         return [p for _s, _l, p in scored[:limit]]
+
+
+# ------------------------------------------------------------------ своя картинка и свой текст для трека
+def custom_cover_file(covers_dir, path):
+    """Файл со своей картинкой трека (выбрана пользователем; сам трек не трогаем)."""
+    import hashlib
+    key = os.path.normcase(os.path.normpath(path)).encode("utf-8", "replace")
+    return os.path.join(covers_dir, "custom", hashlib.md5(key).hexdigest() + ".jpg")
+
+
+_LRC_TS = re.compile(r"\[\d{1,3}:\d{2}(?:[.:]\d{1,3})?\]")
+
+
+def text_to_lrc(text, duration):
+    """Текст песни → .lrc. Таймкоды есть — оставить как есть; нет — расставить строки равномерно
+    по длине трека (приблизительно: точно попасть без таймкодов нельзя). Пусто — None."""
+    text = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return None
+    if len(_LRC_TS.findall(text)) >= 2:
+        return text + "\n"
+    lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+    lines = [ln for ln in lines if not re.fullmatch(r"\[.{1,40}\]", ln)]         # [Chorus], [Куплет 1]
+    if not lines:
+        return None
+    dur = max(20.0, float(duration or 0) or 4.0 * len(lines))
+    start, end = min(15.0, dur * 0.08), dur * 0.95
+    step = (end - start) / max(1, len(lines))
+    out = []
+    for i, ln in enumerate(lines):
+        t = start + i * step
+        out.append(f"[{int(t // 60):02d}:{t % 60:05.2f}]{ln}")
+    return "\n".join(out) + "\n"

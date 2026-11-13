@@ -211,6 +211,7 @@ class CoverCache(QObject):
         super().__init__()
         self.dir = cache_dir
         self.mem = {}                # путь → QImage (или None, если обложки нет)
+        self._custom = {}            # путь → своя картинка (или None)
         self.queue = []
         self.lock = threading.Lock()
         self.busy = False
@@ -220,6 +221,41 @@ class CoverCache(QObject):
     def get_artist(self, name):
         """Фото исполнителя (из интернета, с кэшем) или None, пока ищется / не нашлось."""
         return self.get("artist:" + name) if name else None
+
+    def custom(self, path):
+        """Своя картинка трека (поставил пользователь) или None."""
+        if not path or path.startswith("artist:"):
+            return None
+        if path not in self._custom:
+            img = None
+            f = libmod.custom_cover_file(self.dir, path)
+            if os.path.isfile(f):
+                img = QImage(f)
+                if img.isNull():
+                    img = None
+            self._custom[path] = img
+        return self._custom[path]
+
+    def set_custom(self, path, img):
+        """Поставить (img) или убрать (None) свою картинку трека."""
+        f = libmod.custom_cover_file(self.dir, path)
+        if img is None:
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+            self._custom[path] = None
+            self.mem.pop(path, None)                 # вернётся родная обложка
+        else:
+            img = img.scaled(700, 700, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                             Qt.TransformationMode.SmoothTransformation)
+            x, y = (img.width() - 700) // 2, (img.height() - 700) // 2
+            img = img.copy(max(0, x), max(0, y), min(700, img.width()), min(700, img.height()))
+            os.makedirs(os.path.dirname(f), exist_ok=True)
+            img.save(f, "JPG", 92)
+            self._custom[path] = img
+            self.mem[path] = img
+        self.ready.emit(path)
 
     def forget_missing(self):
         """Включили поиск в интернете — заново поискать то, чего не было."""
@@ -265,7 +301,11 @@ class CoverCache(QObject):
                     self.mem[path] = img
                     self.ready.emit(path)
                     continue
-                img = None
+                img = self.custom(path)                 # своя картинка важнее родной
+                if img is not None:
+                    self.mem[path] = img
+                    self.ready.emit(path)
+                    continue
                 local_missing = False
                 disk = self._disk(path)
                 if os.path.isfile(disk):
@@ -1229,6 +1269,15 @@ class NowPlaying(QWidget):
         self.vol_kick = 0.0             # толчок при каждом щелчке колеса (+ громче, − тише)
         self._wheel_acc = 0.0
         self._mouse_t = 0.0             # когда последний раз двигали мышью над страницей
+        # эффекты под бит: обложка «качает», от неё расходятся кольца и летят частицы
+        self._accent = QColor(CYAN)     # самый сочный цвет обложки
+        self._bass_avg = 0.0            # средний уровень басов (от него считаем удар)
+        self._bass_prev = 0.0
+        self._beat = 0.0                # сила последнего удара, затухает
+        self._beat_t = 0.0
+        self._rings = []                # [возраст, сила]
+        self._parts = []                # [x, y, vx, vy, возраст, жизнь, размер, вид]
+        self._mote_acc = 0.0
         self._glide_until = 0.0         # после клика по строке текст плавно доезжает, а не прыгает
         self._pulse = (-1, 0.0)         # (строка, когда кликнули) — вспышка на выбранной строке
         self.wave = WavePanel(win)
@@ -1273,6 +1322,213 @@ class NowPlaying(QWidget):
         self.vol_kick = 1.0 if steps > 0 else -1.0
         self.vol_until = time.monotonic() + 1.6
         self.update()
+
+    # ------------------------------------------------------------ эффекты под бит
+    def _beat_fx(self, p, dt, now, cx, cy, side):
+        """Ловит удары по басам, рисует кольца и частицы. Возвращает силу удара 0..1 (для обложки)."""
+        import random
+        o = self.win.owner
+        if not o.cfg.get("beat_fx", True):
+            self._parts, self._rings, self._beat = [], [], 0.0
+            return 0.0
+        try:
+            playing = bool(o.is_playing())
+        except Exception:
+            playing = False
+        sp = getattr(o, "spectrum", None)
+        live = False
+        if playing and sp is not None:
+            try:
+                live = bool(sp.recent())
+                bands = list(sp.bands[:3]) if live else []
+            except Exception:
+                live, bands = False, []
+            if live and bands:
+                bass = max(float(b) for b in bands)
+                self._bass_avg += (bass - self._bass_avg) * (1 - math.exp(-dt * 2.2))
+                rise = bass - self._bass_prev
+                self._bass_prev = bass
+                # удар: басы резко выросли и заметно выше своего среднего
+                if (bass > self._bass_avg * 1.18 + 0.05 and rise > 0.03 and now - self._beat_t > 0.2):
+                    self._hit(min(1.0, 0.45 + (bass - self._bass_avg) * 2.2), now, cx, cy, side, random)
+        if playing and not live and now - self._beat_t > 0.62:       # звук не разобрать — ровный мягкий пульс
+            self._hit(0.4, now, cx, cy, side, random)
+        self._beat *= math.exp(-dt * 6.5)
+        accent = self._accent
+        w, h = self.width(), self.height() - 132
+
+        # редкие «пылинки», всплывают сами по себе, пока играет музыка
+        if playing:
+            self._mote_acc += dt * 7
+            while self._mote_acc >= 1 and len(self._parts) < 150:
+                self._mote_acc -= 1
+                self._parts.append([random.uniform(0, w * 0.5), random.uniform(h * 0.25, h), random.uniform(-10, 10),
+                                    random.uniform(-34, -12), 0.0, random.uniform(2.5, 4.5),
+                                    random.uniform(1.2, 2.6), 2])
+        # свечение за обложкой на удар
+        bt = self._beat
+        if bt > 0.02:
+            g = QRadialGradient(QPointF(cx, cy), side * (0.75 + 0.25 * bt))
+            c0, c1 = QColor(accent), QColor(accent)
+            c0.setAlpha(int(120 * bt)), c1.setAlpha(0)
+            g.setColorAt(0.35, c0)
+            g.setColorAt(1.0, c1)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(g)
+            p.drawEllipse(QPointF(cx, cy), side * 1.05, side * 1.05)
+        # кольца: наклонённые квадраты расходятся от обложки и тают
+        p.save()
+        p.translate(cx, cy)
+        p.rotate(-5)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        alive = []
+        for ring in self._rings:
+            ring[0] += dt
+            k = ring[0] / 0.75
+            if k >= 1:
+                continue
+            alive.append(ring)
+            c = QColor(accent if len(alive) % 2 else WHITE)
+            c.setAlpha(int(190 * ring[1] * (1 - k) ** 2))
+            p.setPen(QPen(c, 1.0 + 3.0 * (1 - k)))
+            half = side / 2 * (1.02 + 0.42 * k * (0.6 + 0.4 * ring[1]))
+            p.drawRect(QRectF(-half, -half, half * 2, half * 2))
+        self._rings = alive
+        p.restore()
+        # частицы
+        p.setPen(Qt.PenStyle.NoPen)
+        alive = []
+        for q in self._parts:
+            q[4] += dt
+            k = q[4] / q[5]
+            if k >= 1:
+                continue
+            drag = math.exp(-dt * (1.6 if q[7] != 2 else 0.0))
+            q[2] *= drag
+            q[3] = q[3] * drag - (14 * dt if q[7] != 2 else 0)        # искры чуть всплывают
+            q[0] += q[2] * dt
+            q[1] += q[3] * dt
+            alive.append(q)
+            fade = (1 - k) if q[7] != 2 else math.sin(math.pi * k) * 0.55
+            c = QColor(WHITE if q[7] == 1 else accent)
+            c.setAlpha(int(235 * fade))
+            p.setBrush(c)
+            sz = q[6] * (1 - 0.5 * k if q[7] != 2 else 1.0)
+            if q[7] == 1:                                             # ромбик-искра
+                p.drawPolygon(QPolygonF([QPointF(q[0], q[1] - sz * 1.6), QPointF(q[0] + sz, q[1]),
+                                         QPointF(q[0], q[1] + sz * 1.6), QPointF(q[0] - sz, q[1])]))
+            else:
+                p.drawEllipse(QPointF(q[0], q[1]), sz, sz)
+        self._parts = alive
+        return bt
+
+    def _hit(self, power, now, cx, cy, side, random):
+        """Удар: вспышка, кольцо и сноп частиц от краёв обложки."""
+        self._beat = max(self._beat, power)
+        self._beat_t = now
+        self._rings.append([0.0, power])
+        if len(self._rings) > 5:
+            self._rings.pop(0)
+        for _ in range(int(7 + 13 * power)):
+            if len(self._parts) >= 190:
+                break
+            a = random.uniform(0, math.tau)
+            ca, sa = math.cos(a), math.sin(a)
+            edge = side * 0.52 / max(abs(ca), abs(sa))               # точка на краю квадрата обложки
+            sp = random.uniform(70, 260) * (0.5 + power)
+            self._parts.append([cx + ca * edge, cy + sa * edge, ca * sp, sa * sp, 0.0,
+                                random.uniform(0.6, 1.3), random.uniform(1.6, 4.2),
+                                1 if random.random() < 0.35 else 0])
+
+    # ------------------------------------------------------------ ПКМ: свой текст и своя картинка
+    def contextMenuEvent(self, e):
+        o = self.win.owner
+        path = getattr(o, "loaded_path", None)
+        if not isinstance(path, str) or not path or getattr(o, "radio", False):
+            return
+        from PySide6.QtGui import QGuiApplication
+        clip = QGuiApplication.clipboard()
+        has_img = not clip.image().isNull()
+        has_txt = bool((clip.text() or "").strip())
+        m = QMenu(self)
+        a = m.addAction("📋  Вставить текст песни из буфера", lambda: self.set_lyrics_text(path, clip.text()))
+        a.setEnabled(has_txt)
+        m.addAction("📄  Текст песни из файла (.lrc, .txt)…", lambda: self.pick_lyrics_file(path))
+        m.addSeparator()
+        a = m.addAction("📋  Вставить картинку из буфера", lambda: self.set_picture(path, clip.image()))
+        a.setEnabled(has_img)
+        m.addAction("🖼  Картинка для трека из файла…", lambda: self.pick_picture(path))
+        if self.win.covers.custom(path) is not None:
+            m.addAction("✖  Убрать свою картинку", lambda: self.set_picture(path, None))
+        m.exec(e.globalPos())
+
+    def set_picture(self, path, img):
+        if img is not None and img.isNull():
+            self.win.toast("В БУФЕРЕ НЕТ КАРТИНКИ")
+            return
+        self.win.covers.set_custom(path, img)
+        hook = getattr(self.win.owner, "custom_cover_changed", None)
+        if callable(hook):
+            hook(path)                                       # маленький плеер тоже покажет её
+        self._pm_key = None
+        self.win.toast("🖼 КАРТИНКА ПОСТАВЛЕНА" if img is not None else "КАРТИНКА УБРАНА")
+        self.update()
+
+    def pick_picture(self, path):
+        from PySide6.QtWidgets import QFileDialog
+        fn, _ = QFileDialog.getOpenFileName(self, "Картинка для трека", os.path.dirname(path),
+                                            "Картинки (*.jpg *.jpeg *.png *.webp *.bmp *.gif)")
+        if fn:
+            img = QImage(fn)
+            if img.isNull():
+                self.win.toast("НЕ УДАЛОСЬ ОТКРЫТЬ КАРТИНКУ")
+            else:
+                self.set_picture(path, img)
+
+    def set_lyrics_text(self, path, text):
+        """Текст из буфера / файла → свой .lrc для трека (рядом с настройками плеера, трек не трогаем)."""
+        o = self.win.owner
+        try:
+            dur = o.player.duration() / 1000.0
+        except Exception:
+            dur = 0.0
+        timed = len(libmod._LRC_TS.findall(text or "")) >= 2
+        lrc = libmod.text_to_lrc(text, dur)
+        if not lrc:
+            self.win.toast("В БУФЕРЕ НЕТ ТЕКСТА")
+            return
+        folder = os.path.join(os.path.dirname(self.win.covers.dir), "lyrics_user")
+        f = os.path.join(folder, os.path.basename(libmod.custom_cover_file("", path))[:-4] + ".lrc")
+        try:
+            os.makedirs(folder, exist_ok=True)
+            with open(f, "w", encoding="utf-8") as fh:
+                fh.write(lrc)
+        except OSError:
+            self.win.toast("НЕ УДАЛОСЬ СОХРАНИТЬ ТЕКСТ")
+            return
+        o.link_lrc_file(f)
+        self.scroll = None
+        self.win.toast("📝 ТЕКСТ ВСТАВЛЕН" if timed else "📝 ТЕКСТ ВСТАВЛЕН · ВРЕМЯ СТРОК ПРИМЕРНОЕ")
+
+    def pick_lyrics_file(self, path):
+        from PySide6.QtWidgets import QFileDialog
+        fn, _ = QFileDialog.getOpenFileName(self, "Текст для: " + os.path.basename(path), os.path.dirname(path),
+                                            "Текст песни (*.lrc *.txt);;Все файлы (*.*)")
+        if not fn:
+            return
+        try:
+            with open(fn, "rb") as fh:
+                raw = fh.read(400000)
+        except OSError:
+            self.win.toast("НЕ УДАЛОСЬ ОТКРЫТЬ ФАЙЛ")
+            return
+        for enc in ("utf-8-sig", "utf-16", "cp1251"):
+            try:
+                text = raw.decode(enc)
+                break
+            except UnicodeError:
+                text = ""
+        self.set_lyrics_text(path, text)
 
     def _paint_volume(self, p, dt, cx, cy, side):
         o = self.win.owner
@@ -1377,6 +1633,9 @@ class NowPlaying(QWidget):
 
     def _cover_img(self):
         o = self.win.owner
+        cust = self.win.covers.custom(getattr(o, "loaded_path", None) or "")
+        if cust is not None:
+            return cust
         img = getattr(o, "_cover", None)
         if img is not None and hasattr(img, "isNull") and not img.isNull():
             return img
@@ -1427,9 +1686,11 @@ class NowPlaying(QWidget):
             self._back_key = key
             w, h = max(1, r.width()), max(1, r.height())
             if img is None:
+                self._accent = QColor(CYAN)
                 self._back = QPixmap(bg_pixmap(w, h))
                 return self._back
             accent, avg = self._palette(img)
+            self._accent = QColor(accent)
             pm = QPixmap(w, h)
             p = QPainter(pm)
             p.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -1521,6 +1782,7 @@ class NowPlaying(QWidget):
         self.ry = ease(self.ry, tx * 16, 9)
         self.rx = ease(self.rx, -ty * 13, 9)
         hv = self.hover
+        bt = self._beat_fx(p, dt, now, cx, cy, side)                  # кольца и частицы — под обложкой
         bob = math.sin(self._t * 2.1) * 9 * hv
         wob = math.sin(self._t * 1.4) * 1.6 * hv
         tr = QTransform()
@@ -1528,7 +1790,7 @@ class NowPlaying(QWidget):
         tr.rotate(self.ry, Qt.Axis.YAxis)
         tr.rotate(self.rx, Qt.Axis.XAxis)
         tr.rotate(-5 * (1 - 0.5 * hv) + wob)
-        tr.scale(1 + 0.06 * hv, 1 + 0.06 * hv)
+        tr.scale(1 + 0.06 * hv + 0.035 * bt, 1 + 0.06 * hv + 0.035 * bt)     # на удар обложка «качает»
         art = QRectF(-side / 2, -side / 2, side, side)
         p.save()
         p.setTransform(tr)
@@ -1536,8 +1798,11 @@ class NowPlaying(QWidget):
         p.setBrush(QColor(0, 0, 0, int(70 + 50 * hv)))              # тень — дальше, когда «взлетает»
         p.drawRect(art.translated(18 + 22 * hv - self.ry * 0.8, 22 + 26 * hv + self.rx * 0.8))
         p.setBrush(CYAN)
-        p.drawRect(art.translated(12 + 6 * hv - self.ry * 0.4, 12 + 6 * hv + self.rx * 0.4))
+        p.drawRect(art.translated(12 + 6 * hv - self.ry * 0.4 + 5 * bt, 12 + 6 * hv + self.rx * 0.4 + 5 * bt))
         p.drawPixmap(art.toRect(), self._cover_pm(img, side, getattr(o, "title", "")))
+        if bt > 0.02:                                                 # вспышка по обложке на удар
+            p.setBrush(QColor(255, 255, 255, int(46 * bt * bt)))
+            p.drawRect(art)
         if hv > 0.01:                                                 # блик скользит за наклоном
             gx = art.left() + art.width() * (0.5 - self.ry / 32)
             gy = art.top() + art.height() * (0.5 + self.rx / 26)
@@ -1985,6 +2250,9 @@ class PlayerBar(QWidget):
             self.vol.blockSignals(False)
         img = getattr(o, "_cover", None)
         path = getattr(o, "loaded_path", None)
+        cust = self.win.covers.custom(path or "")
+        if cust is not None:
+            img = cust
         key = (img.cacheKey() if img is not None and hasattr(img, "cacheKey") else None, path)
         if key != self._art_key:
             self._art_key = key
@@ -2258,6 +2526,9 @@ class SettingsPage(QWidget):
         self.toggle("Искать неизвестных исполнителей в интернете", lambda: cfg("online_artist", True),
                     lambda: self.flip("online_artist", True, after=getattr(o, "find_unknown_artists", None)),
                     "Трек без исполнителя — плеер сам найдёт, кто это. Не тот — ПКМ по треку → «Не тот исполнитель»")
+        self.toggle("Эффекты под бит на «Сейчас играет»", lambda: cfg("beat_fx", True),
+                    lambda: self.flip("beat_fx", True),
+                    "Обложка качает в такт, от неё расходятся кольца и летят частицы")
         self.toggle("Анимация переходов", lambda: cfg("ui_anim", True), lambda: self.flip("ui_anim", True),
                     "Страницы выезжают скошенной полосой, как меню P3R")
         self.toggle("Звуки меню", lambda: cfg("ui_sounds", True), lambda: self.flip("ui_sounds", True),

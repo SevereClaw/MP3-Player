@@ -1382,7 +1382,7 @@ class Mp3Widget(QWidget):
         else:
             self.artist, self.title = self.library.auto_artist(path), stem     # найден в интернете
         self.album = ""
-        self._cover = None
+        self._cover = self._custom_cover(path)              # своя картинка трека, если ставили
         self._np_cover = ("", "")
         self.remember_position()                 # место в прошлом (длинном) файле
         resumed = False
@@ -2202,6 +2202,24 @@ class Mp3Widget(QWidget):
             self.search_panel.run()
         self.find_unknown_artists()
 
+    def _custom_cover(self, path):
+        """Своя картинка трека (поставлена в медиатеке по ПКМ) или None."""
+        try:
+            f = libmod.custom_cover_file(os.path.join(self.data_dir, "covers"), path)
+            if os.path.isfile(f):
+                img = QImage(f)
+                return None if img.isNull() else img
+        except Exception:
+            pass
+        return None
+
+    def custom_cover_changed(self, path):
+        if self.loaded_path and pkey(self.loaded_path) == pkey(path):
+            cc = self._custom_cover(path)
+            if cc is not None:
+                self._cover = cc
+            self._np_cover = ("", "")
+
     def find_unknown_artists(self):
         """Треки без исполнителя — поискать, кто это, в интернете (в фоне)."""
         if self.cfg.get("online_artist", True):
@@ -2632,6 +2650,9 @@ class Mp3Widget(QWidget):
             if img is not None and hasattr(img, "isNull") and not img.isNull():
                 self._cover = img
                 break
+        cc = self._custom_cover(self.loaded_path) if self.loaded_path else None
+        if cc is not None:                                   # своя картинка важнее той, что в файле
+            self._cover = cc
         # текст не нашёлся по имени файла — попробовать по тегам (название / исполнитель)
         if (self.cfg.get("lyrics", True) and self.lyrics is None and self.loaded_path
                 and getattr(self, "_meta_lyrics_retry", False) and (t or a)):
