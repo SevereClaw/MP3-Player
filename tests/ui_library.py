@@ -207,6 +207,19 @@ for k in range(0, len(b), 20000):
     print("SHOTPART", "lib_transition.jpg", k // 20000, b[k:k + 20000], flush=True)
 w.open_album(next(a for a in w.albums if a["title"].startswith("Persona"))); dump("lib_album.jpg")
 w.go("now"); dump("lib_now.jpg")
+from PySide6.QtGui import QWheelEvent                     # колёсико на «Сейчас играет» — шкала громкости
+from PySide6.QtCore import QPoint
+_vol = []
+owner.player.setVolume = lambda v: _vol.append(v)
+for _ in range(2):
+    app.sendEvent(w.now, QWheelEvent(QPointF(600, 300), QPointF(600, 300), QPoint(0, 0), QPoint(0, 120),
+                                     Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+                                     Qt.ScrollPhase.NoScrollPhase, False))
+print("громкость колёсиком:", _vol)
+assert _vol == [0.75, 0.75], _vol                         # заглушка всегда отдаёт 0.7 → +5 %
+for _ in range(12):
+    __import__("time").sleep(0.03); w.now.repaint()
+dump("lib_now_volume.jpg")
 from PySide6.QtCore import QPointF as _P
 import time as _t
 r = w.now.rect()

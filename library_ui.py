@@ -1194,6 +1194,12 @@ class NowPlaying(QWidget):
         self._pm_key = None
         self._pm = None
         self.cover_rect = QRectF()
+        # громкость колёсиком: шкала выезжает, столбики догоняют, цифра «подпрыгивает»
+        self.vol_until = 0.0            # до какого момента показывать шкалу
+        self.vol_a = 0.0                # видимость 0..1
+        self.vol_v = None               # показанное значение (плавно догоняет настоящее)
+        self.vol_kick = 0.0             # толчок при каждом щелчке колеса (+ громче, − тише)
+        self._wheel_acc = 0.0
         self.wave = WavePanel(win)
         self.wave.setParent(self)
 
@@ -1208,6 +1214,95 @@ class NowPlaying(QWidget):
 
     def leaveEvent(self, _e):
         self.mouse = None
+
+    def wheelEvent(self, e):
+        """Колёсико в любом месте страницы — громкость (шаг 5 %)."""
+        d = e.angleDelta().y() or e.angleDelta().x()
+        if not d:
+            return
+        self._wheel_acc += d / 120.0
+        steps = int(self._wheel_acc)                # тачпад шлёт мелкие доли — копим до целого шага
+        e.accept()
+        if not steps:
+            return
+        self._wheel_acc -= steps
+        o = self.win.owner
+        try:
+            cur = float(o.player.volume())
+        except Exception:
+            return
+        v = min(1.0, max(0.0, round(cur + 0.05 * steps, 2)))
+        if self.vol_v is None or self.vol_a < 0.02:
+            self.vol_v = cur
+        if v != cur:
+            o.player.setVolume(v)
+            getattr(o, "save_later", lambda: None)()
+            sfx("hover")
+        self.vol_kick = 1.0 if steps > 0 else -1.0
+        self.vol_until = time.monotonic() + 1.6
+        self.update()
+
+    def _paint_volume(self, p, dt, cx, cy, side):
+        o = self.win.owner
+        try:
+            real = float(o.player.volume())
+        except Exception:
+            return
+        k = 1 - math.exp(-dt * 12)
+        self.vol_a += ((1.0 if time.monotonic() < self.vol_until else 0.0) - self.vol_a) * k
+        if self.vol_a < 0.01 or not isinstance(real, float):
+            return
+        self.vol_v = real if self.vol_v is None else self.vol_v + (real - self.vol_v) * (1 - math.exp(-dt * 16))
+        self.vol_kick *= math.exp(-dt * 7)
+        a, kick = self.vol_a, self.vol_kick
+        w, h = max(300.0, min(side * 1.05, 440.0)), 78.0
+        box = QRectF(cx - w / 2 - (1 - a) * 46, cy + side / 2 - h * 0.35, w, h)      # выезжает слева
+        p.save()
+        p.setOpacity(a)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(0, 0, 0, 110))
+        p.drawPolygon(skew_poly(box.translated(8, 8), 20))
+        g = QLinearGradient(box.topLeft(), box.bottomRight())
+        g.setColorAt(0, QColor(8, 26, 70, 245))
+        g.setColorAt(1, QColor(3, 10, 31, 245))
+        p.setBrush(g)
+        p.setPen(QPen(CYAN, 2))
+        p.drawPolygon(skew_poly(box, 20))
+        p.setFont(pfont(12))
+        p.setPen(CYAN)
+        label = "ГРОМКОСТЬ" + ("  ▲" if kick > 0.15 else ("  ▼" if kick < -0.15 else ""))
+        p.drawText(QRectF(box.left() + 30, box.top() + 8, 200, 18), Qt.AlignmentFlag.AlignVCenter, label)
+        # столбики: растут слева направо, последний «живой» подпрыгивает на щелчке
+        n = 20
+        bx, bw_all = box.left() + 26, box.width() - 132
+        step = bw_all / n
+        base = box.bottom() - 14
+        fill = self.vol_v * n
+        p.setPen(Qt.PenStyle.NoPen)
+        for i in range(n):
+            part = max(0.0, min(1.0, fill - i))
+            hh = 10 + 24 * (i + 1) / n
+            near = max(0.0, 1.0 - abs(i + 0.5 - fill) / 2.5)
+            hh += 9 * abs(kick) * near
+            r = QRectF(bx + i * step, base - hh, step * 0.62, hh)
+            p.setBrush(QColor(255, 255, 255, 34))
+            p.drawPolygon(skew_poly(r, 4))
+            if part > 0:
+                c = QColor(WHITE) if near > 0.5 and abs(kick) > 0.2 else QColor(CYAN if i >= n * 0.5 else ICE)
+                c.setAlpha(int(255 * (0.35 + 0.65 * part)))
+                p.setBrush(c)
+                p.drawPolygon(skew_poly(QRectF(r.left(), r.bottom() - hh * part, r.width(), hh * part), 4))
+        # цифра — крупно, на щелчке увеличивается и возвращается
+        num = QRectF(box.right() - 108, box.top() + 4, 92, h - 8)
+        p.translate(num.center())
+        sc = 1.0 + 0.22 * abs(kick)
+        p.scale(sc, sc)
+        p.translate(0, -5 * kick)
+        p.setFont(pfont(34))
+        p.setPen(WHITE if real > 0 else DIM)
+        p.drawText(QRectF(-60, -30, 120, 60), Qt.AlignmentFlag.AlignCenter,
+                   f"{int(round(self.vol_v * 100))}" if real > 0 else "ВЫКЛ")
+        p.restore()
 
     def _line_at(self, pos):
         for rect, t in getattr(self, "_line_hits", []):
@@ -1328,6 +1423,8 @@ class NowPlaying(QWidget):
             p.setBrush(g)
             p.drawRect(art)
         p.restore()
+
+        self._paint_volume(p, dt, cx, cy, side)
 
         # название — крупно, курсивом, с голубой плашкой под исполнителем
         x = r.width() * 0.48
