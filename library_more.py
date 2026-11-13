@@ -227,6 +227,7 @@ class AddToPlaylist(QWidget):
         sc.setFrameShape(QFrame.Shape.NoFrame)
         sc.setWidget(box)
         sc.setMaximumHeight(330)
+        sc.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         sc.setStyleSheet("QScrollArea, QScrollArea > QWidget > QWidget { background:transparent; }")
         lay.addWidget(sc)
         new = P3Action("+  НОВЫЙ ПЛЕЙЛИСТ")
@@ -508,13 +509,14 @@ class Strip(QListView):
         self.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.horizontalScrollBar().setSingleStep(40)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)    # листается колесом и стрелками
         self.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self.model_ = ListModel()
         self.setModel(self.model_)
         self.tiles = TileDelegate(win, round_art)
         self.tiles.W, self.tiles.H = 170, 232
         self.setItemDelegate(self.tiles)
-        self.setFixedHeight(self.tiles.H + 22)
+        self.setFixedHeight(self.tiles.H + 8)
         self.setDragEnabled(True)
         self.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
         self.home = None

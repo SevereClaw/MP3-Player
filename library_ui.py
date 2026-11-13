@@ -2433,6 +2433,7 @@ class SettingsPage(QWidget):
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.scroll.setStyleSheet("QScrollArea, QScrollArea > QWidget > QWidget { background:transparent; }")
         body = QWidget()
         self.lay = QVBoxLayout(body)
@@ -3126,8 +3127,11 @@ class LibraryWindow(QWidget):
             QScrollBar:vertical {{ background:transparent; width:10px; margin:4px 2px; }}
             QScrollBar::handle:vertical {{ background:{CYAN_D.name()}; min-height:30px; }}
             QScrollBar::handle:vertical:hover {{ background:{c}; }}
+            QScrollBar:horizontal {{ background:transparent; height:8px; margin:0 4px; }}
+            QScrollBar::handle:horizontal {{ background:{CYAN_D.name()}; min-width:30px; }}
+            QScrollBar::handle:horizontal:hover {{ background:{c}; }}
             QScrollBar::add-line, QScrollBar::sub-line, QScrollBar::add-page, QScrollBar::sub-page {{
-                height:0; background:none; }}
+                height:0; width:0; background:none; }}
             QSlider::groove:horizontal {{ height:4px; background:#1b3570; }}
             QSlider::sub-page:horizontal {{ background:qlineargradient(x1:0,y1:0,x2:1,y2:0,
                                             stop:0 {w}, stop:1 {c}); }}
