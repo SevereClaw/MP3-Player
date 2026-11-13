@@ -1119,9 +1119,9 @@ class WavePanel(QWidget):
         if self.active() and self.o.cfg.get("wave_mode") == k:
             return
         self.o.cfg["wave_mode"] = k
-        if self.active():
-            self.o.start_wave(k)              # сменили характер — новая волна сразу
+        self.o.start_wave(k)                  # нажал характер — волна сразу играет (и включается, если была выключена)
         self.sync()
+        QTimer.singleShot(100, self.sync)
 
     def toggle(self):
         if self.active():

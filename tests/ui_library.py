@@ -221,6 +221,14 @@ print("текст едет к строке", _k, "от", round(_s0, 2), ":", _pa
 assert _s0 < _path[0] < _path[-1] <= _k and _path[0] - _s0 < (_k - _s0) * 0.5, _path
 dump("lib_now_glide.jpg")
 w.now._glide_until = 0; w.now.scroll = None
+_wave = []                                                # характер «Моей волны» — нажал, и волна играет
+_sw, _wa = getattr(owner, "start_wave", None), getattr(owner, "wave_active", None)
+owner.wave_active = lambda: False
+owner.start_wave = lambda m=None: _wave.append(m)
+w.now.wave.chips["fav"].click()
+print("волна по нажатию характера:", _wave)
+assert _wave == ["fav"], _wave
+owner.start_wave, owner.wave_active = _sw, _wa
 _rep = []                                                 # кнопка повтора: список → трек → выкл
 owner.set_repeat = lambda m: (_rep.append(m), setattr(owner, "repeat", m))
 for _ in range(3):
