@@ -2404,12 +2404,141 @@ class Transition(QWidget):
         p.drawPolygon(band)
         p.end()
 
+
+# ---------------------------------------------------------------- своя рамка окна в стиле P3R
+class TitleButton(QPushButton):
+    def __init__(self, kind):
+        super().__init__()
+        self.kind = kind                         # min / max / close
+        self.setFixedSize(54, 34)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._hover = False
+
+    def enterEvent(self, _e):
+        self._hover = True
+        sfx("hover")
+        self.update()
+
+    def leaveEvent(self, _e):
+        self._hover = False
+        self.update()
+
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = QRectF(self.rect()).adjusted(2, 5, -2, -5)
+        if self._hover:
+            g = QLinearGradient(r.topLeft(), r.topRight())
+            if self.kind == "close":
+                g.setColorAt(0, QColor("#ff7aa0"))
+                g.setColorAt(1, QColor("#e0245e"))
+            else:
+                g.setColorAt(0, WHITE)
+                g.setColorAt(1, CYAN)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(g)
+            p.drawPolygon(skew_poly(r, 8))
+        ink = (WHITE if self.kind == "close" else NAVY) if self._hover else ICE
+        pen = QPen(ink, 2)
+        pen.setCapStyle(Qt.PenCapStyle.SquareCap)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        c = r.center()
+        if self.kind == "min":
+            p.drawLine(QPointF(c.x() - 6, c.y() + 1), QPointF(c.x() + 6, c.y() + 1))
+        elif self.kind == "max":
+            if self.window().isMaximized():
+                p.drawRect(QRectF(c.x() - 4, c.y() - 2, 9, 8))
+                p.drawPolyline([QPointF(c.x() - 1, c.y() - 5), QPointF(c.x() + 8, c.y() - 5), QPointF(c.x() + 8, c.y() + 3)])
+            else:
+                p.drawRect(QRectF(c.x() - 6, c.y() - 5, 12, 10))
+        else:
+            p.drawLine(QPointF(c.x() - 5, c.y() - 5), QPointF(c.x() + 5, c.y() + 5))
+            p.drawLine(QPointF(c.x() + 5, c.y() - 5), QPointF(c.x() - 5, c.y() + 5))
+        p.end()
+
+
+class TitleBar(QWidget):
+    """Заголовок окна: тянуть — двигать (с прилипанием к краям Windows), двойной клик — на весь экран."""
+
+    def __init__(self, win, title):
+        super().__init__()
+        self.win = win
+        self.title = title
+        self.setFixedHeight(38)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 6, 0)
+        lay.setSpacing(0)
+        lay.addStretch(1)
+        self.bmin, self.bmax, self.bclose = TitleButton("min"), TitleButton("max"), TitleButton("close")
+        self.bmin.clicked.connect(win.showMinimized)
+        self.bmax.clicked.connect(self.toggle_max)
+        self.bclose.clicked.connect(win.close)
+        for b in (self.bmin, self.bmax, self.bclose):
+            lay.addWidget(b)
+
+    def toggle_max(self):
+        sfx("select")
+        self.win.showNormal() if self.win.isMaximized() else self.win.showMaximized()
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            h = self.win.windowHandle()
+            if h is not None:
+                h.startSystemMove()
+
+    def mouseDoubleClickEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self.toggle_max()
+
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = QRectF(self.rect())
+        g = QLinearGradient(r.topLeft(), r.topRight())
+        g.setColorAt(0, QColor(3, 10, 31))
+        g.setColorAt(0.6, QColor(6, 19, 49))
+        g.setColorAt(1, QColor(11, 34, 87))
+        p.fillRect(r, g)
+        # голубая скошенная плашка с названием — как заголовок меню P3R
+        f = pfont(14)
+        fm = QFontMetrics(f)
+        tw = fm.horizontalAdvance(self.title)
+        tag = QRectF(10, 6, tw + 64, r.height() - 12)
+        tg = QLinearGradient(tag.topLeft(), tag.topRight())
+        tg.setColorAt(0, WHITE)
+        tg.setColorAt(1, CYAN)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(tg)
+        p.drawPolygon(skew_poly(tag, 10))
+        p.setBrush(CYAN)
+        p.drawPolygon(skew_poly(QRectF(tag.right() + 4, tag.top(), 10, tag.height()), 10))
+        p.setBrush(QColor(47, 211, 255, 120))
+        p.drawPolygon(skew_poly(QRectF(tag.right() + 18, tag.top(), 6, tag.height()), 10))
+        # нота-значок
+        p.setFont(pfont(15, italic=False))
+        p.setPen(NAVY)
+        p.drawText(QRectF(tag.left() + 14, tag.top(), 20, tag.height()), Qt.AlignmentFlag.AlignVCenter, "♪")
+        p.setFont(f)
+        p.drawText(QRectF(tag.left() + 36, tag.top(), tw + 10, tag.height()), Qt.AlignmentFlag.AlignVCenter, self.title)
+        # нижняя линия: яркая слева, гаснет вправо
+        lg = QLinearGradient(r.bottomLeft(), r.bottomRight())
+        lg.setColorAt(0, CYAN)
+        lg.setColorAt(0.5, QColor(47, 211, 255, 90))
+        lg.setColorAt(1, QColor(47, 211, 255, 20))
+        p.setPen(QPen(QBrush(lg), 2))
+        p.drawLine(QPointF(0, r.bottom()), QPointF(r.right(), r.bottom()))
+        p.end()
+
 class LibraryWindow(QWidget):
     """Большое окно «Медиатека». owner — Mp3Widget (плеер)."""
+    EDGE = 6
     closed = Signal()
 
     def __init__(self, owner, cache_dir):
-        super().__init__(None, Qt.WindowType.Window)
+        super().__init__(None, Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
+        self.setMouseTracking(True)
         self.owner = owner
         self.lib = owner.library
         self.setWindowTitle("Медиатека — MP3 Плеер")
@@ -2435,9 +2564,16 @@ class LibraryWindow(QWidget):
         self.playlists = more.Playlists(getattr(owner, "data_dir", os.path.dirname(cache_dir)))
         self._pl_version = -1
 
-        root = QHBoxLayout(self)
+        frame = QVBoxLayout(self)
+        frame.setContentsMargins(self.EDGE, self.EDGE, self.EDGE, self.EDGE)   # край — тянуть, чтобы менять размер
+        frame.setSpacing(0)
+        self.frame = frame
+        self.titlebar = TitleBar(self, "МЕДИАТЕКА — MP3 ПЛЕЕР")
+        frame.addWidget(self.titlebar)
+        root = QHBoxLayout()
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
+        frame.addLayout(root, 1)
         side = QWidget()
         side.setObjectName("side")
         side.setFixedWidth(250)
@@ -2654,7 +2790,83 @@ class LibraryWindow(QWidget):
     def paintEvent(self, e):
         p = QPainter(self)
         p.drawPixmap(e.rect(), bg_pixmap(self.width(), self.height()), e.rect())      # только то, что просили
+        if not self.isMaximized():
+            # обводка: голубая линия с бело-голубым «бликом» в углах, как рамки в меню P3R
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            r = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+            p.setPen(QPen(QColor(3, 10, 31), 4))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRect(r.adjusted(2, 2, -2, -2))
+            g = QLinearGradient(r.topLeft(), r.bottomRight())
+            g.setColorAt(0, CYAN)
+            g.setColorAt(0.5, CYAN_D)
+            g.setColorAt(1, CYAN)
+            p.setPen(QPen(QBrush(g), 2))
+            p.drawRect(r)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(WHITE)
+            k = 26
+            p.drawPolygon(QPolygonF([r.topLeft(), QPointF(r.left() + k, r.top()), QPointF(r.left() + k - 4, r.top() + 4),
+                                     QPointF(r.left() + 4, r.top() + 4), QPointF(r.left() + 4, r.top() + k - 4),
+                                     QPointF(r.left(), r.top() + k)]))
+            p.drawPolygon(QPolygonF([r.bottomRight(), QPointF(r.right() - k, r.bottom()),
+                                     QPointF(r.right() - k + 4, r.bottom() - 4), QPointF(r.right() - 4, r.bottom() - 4),
+                                     QPointF(r.right() - 4, r.bottom() - k + 4), QPointF(r.right(), r.bottom() - k)]))
         p.end()
+
+    # ------------------------------------------------------------ рамка: размер, развернуть
+    def _edges(self, pos):
+        if self.isMaximized():
+            return Qt.Edge(0)
+        e, w, h = self.EDGE + 2, self.width(), self.height()
+        x, y = pos.x(), pos.y()
+        edges = Qt.Edge(0)
+        if x <= e:
+            edges |= Qt.Edge.LeftEdge
+        if x >= w - e:
+            edges |= Qt.Edge.RightEdge
+        if y <= e:
+            edges |= Qt.Edge.TopEdge
+        if y >= h - e:
+            edges |= Qt.Edge.BottomEdge
+        return edges
+
+    def mouseMoveEvent(self, e):
+        ed = self._edges(e.position())
+        L, R, T, B = Qt.Edge.LeftEdge, Qt.Edge.RightEdge, Qt.Edge.TopEdge, Qt.Edge.BottomEdge
+        if ed in (L | T, R | B):
+            self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+        elif ed in (R | T, L | B):
+            self.setCursor(Qt.CursorShape.SizeBDiagCursor)
+        elif ed in (L, R):
+            self.setCursor(Qt.CursorShape.SizeHorCursor)
+        elif ed in (T, B):
+            self.setCursor(Qt.CursorShape.SizeVerCursor)
+        else:
+            self.unsetCursor()
+        super().mouseMoveEvent(e)
+
+    def changeEvent(self, e):
+        if e.type() == QEvent.Type.WindowStateChange:
+            m = 0 if self.isMaximized() else self.EDGE
+            self.frame.setContentsMargins(m, m, m, m)
+            self.titlebar.bmax.update()
+            self.update()
+        super().changeEvent(e)
+
+    def showEvent_native(self):
+        """Кнопка в панели задач должна сворачивать окно и без системной рамки."""
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+            hwnd = int(self.winId())
+            GWL_STYLE, WS_MINIMIZEBOX, WS_MAXIMIZEBOX, WS_SYSMENU = -16, 0x00020000, 0x00010000, 0x00080000
+            u = ctypes.windll.user32
+            st = u.GetWindowLongW(hwnd, GWL_STYLE)
+            u.SetWindowLongW(hwnd, GWL_STYLE, st | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------ данные
     def rebuild(self, force=False):
@@ -3248,6 +3460,9 @@ class LibraryWindow(QWidget):
     def showEvent(self, e):
         self.timer.start()
         super().showEvent(e)
+        if not getattr(self, "_styled_native", False):
+            self._styled_native = True
+            self.showEvent_native()
 
     def closeEvent(self, e):
         # крестик — не выход: окно прячется, программа живёт в трее с маленьким плеером
@@ -3279,5 +3494,9 @@ class LibraryWindow(QWidget):
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.BackButton:
             self.go_back()
-        else:
-            super().mousePressEvent(e)
+            return
+        ed = self._edges(e.position())
+        if e.button() == Qt.MouseButton.LeftButton and ed != Qt.Edge(0) and self.windowHandle() is not None:
+            self.windowHandle().startSystemResize(ed)
+            return
+        super().mousePressEvent(e)
