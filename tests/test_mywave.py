@@ -109,6 +109,54 @@ check("чужих настроение не трогает", mw.mood_factor(m, l
 check("«неизвестный исполнитель» не штрафуется скопом",
       "a" not in mw.mood_note({}, library.UNKNOWN_ARTIST, "", -1))
 
+# ---------- плавные переходы: следующий трек похож на предыдущий по звуку
+import audiofeat as af  # noqa: E402
+
+frng = random.Random(7)
+feat = {}
+for i, p in enumerate(items):                            # половина исполнителей «тяжёлые», половина «тихие»
+    heavy = ARTISTS.index(items[p]["a"]) % 2 == 0
+    e = (0.82 if heavy else 0.25) + frng.uniform(-0.08, 0.08)
+    feat[p] = {"e": e, "p": (0.85 if heavy else 0.3) + frng.uniform(-0.08, 0.08),
+               "b": (0.6 if heavy else 0.25) + frng.uniform(-0.05, 0.05), "t": 150.0 if heavy else 0.0}
+is_heavy = lambda p: feat[p]["e"] > 0.55                 # noqa: E731
+heavy_seed = next(p for p in items if is_heavy(p))
+calm_seed = next(p for p in items if not is_heavy(p))
+
+
+def jumps(use_flow, runs=30, n=20):
+    j = tot = 0
+    for seed in range(runs):
+        o = mw.pick(items, stats, set(), {}, [heavy_seed], "mix", n=n, rng=random.Random(500 + seed), today_iso=TODAY,
+                    feats=feat.get if use_flow else None, prev_path=heavy_seed)
+        chain = [heavy_seed] + o
+        j += sum(1 for a_, b_ in zip(chain, chain[1:]) if is_heavy(a_) != is_heavy(b_))
+        tot += len(o)
+    return j / tot
+
+
+plain, smooth = jumps(False), jumps(True)
+check("резких переходов «тяжёлое ↔ тихое» стало в разы меньше", smooth < plain * 0.3, f"{plain:.0%} → {smooth:.0%}")
+calm = tot = 0
+for seed in range(30):
+    o = mw.pick(items, stats, set(), {}, [calm_seed], "mix", n=6, rng=random.Random(700 + seed), today_iso=TODAY,
+                feats=feat.get, prev_path=calm_seed)
+    calm += sum(1 for p in o if not is_heavy(p))
+    tot += len(o)
+check("после тихого — тихое", calm / tot >= 0.85, f"{calm / tot:.0%} тихого в следующих шести")
+o = mw.pick(items, stats, set(), {}, [], "mix", n=20, rng=random.Random(1), today_iso=TODAY,
+            feats=feat.get, prev_path=heavy_seed)
+check("цикл «Микса» и разрядка при этом сохраняются", kinds(o) == ["known", "known", "new", "old"] * 5
+      and all(artist(o[i]) not in [artist(x) for x in o[max(0, i - 4):i]] for i in range(len(o))))
+half = {p: (feat[p] if i % 2 else None) for i, p in enumerate(items)}
+o = mw.pick(items, stats, set(), {}, [], "mix", n=40, rng=random.Random(2), today_iso=TODAY,
+            feats=half.get, prev_path=heavy_seed)
+check("неразобранные треки тоже попадают в волну", len(o) == 40 and any(half[p] is None for p in o))
+only_calm = {p: it for p, it in items.items() if not is_heavy(p)}
+o = mw.pick(only_calm, stats, set(), {}, [], "mix", n=10, rng=random.Random(3), today_iso=TODAY,
+            feats=feat.get, prev_path=heavy_seed)
+check("похожего нет — волна всё равно играет", len(o) == 10)
+
 # ---------- «не то» дважды — трек больше не попадается
 ban = next(iter(items))
 o = mw.pick(items, stats, set(), {ban: 2}, [], "mix", n=120, rng=random.Random(9), today_iso=TODAY)

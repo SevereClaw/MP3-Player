@@ -2561,6 +2561,9 @@ class SettingsPage(QWidget):
         self.toggle("Искать неизвестных исполнителей в интернете", lambda: cfg("online_artist", True),
                     lambda: self.flip("online_artist", True, after=getattr(o, "find_unknown_artists", None)),
                     "Трек без исполнителя — плеер сам найдёт, кто это. Не тот — ПКМ по треку → «Не тот исполнитель»")
+        self.toggle("Плавные переходы в «Моей волне»", lambda: cfg("wave_flow", True),
+                    getattr(o, "toggle_wave_flow", lambda: None),
+                    "Следующий трек похож на текущий по энергии и темпу. Плеер один раз в фоне слушает каждый файл")
         self.toggle("Эффекты под бит на «Сейчас играет»", lambda: cfg("beat_fx", True),
                     lambda: self.flip("beat_fx", True),
                     "Обложка качает в такт, от неё расходятся кольца и летят частицы")

@@ -43,6 +43,7 @@ import weekly
 import smart
 import library as libmod
 import mywave as wavemod
+import audiofeat
 
 APP_NAME = "MP3Player"
 APP_TITLE = "MP3 Плеер"
@@ -711,6 +712,8 @@ class Mp3Widget(QWidget):
         # выравнивание громкости: меряем каждый файл один раз и запоминаем
         self.loud_cache = loudness.LoudnessCache(
             os.path.join(os.path.dirname(self.settings_path), "loudness.json"))
+        # «характер звука» каждого трека — для плавных переходов в «Моей волне»
+        self.audiofeat = audiofeat.FeatureStore(os.path.join(os.path.dirname(self.settings_path), "audiofeat.json"))
         self.loud_worker = None
         self.loud_gains = []                      # поправки уже измеренных — для «средней»
         if loudness.np is not None:
@@ -2288,6 +2291,7 @@ class Mp3Widget(QWidget):
         if self.search_panel.isVisible():
             self.search_panel.run()
         self.find_unknown_artists()
+        self.analyze_sound()
 
     def _custom_cover(self, path):
         """Своя картинка трека (поставлена в медиатеке по ПКМ) или None."""
@@ -2381,14 +2385,29 @@ class Mp3Widget(QWidget):
     def wave_active(self):
         return self.cfg.get("smart") == "wave" and not self.radio
 
-    def wave_batch(self, n, history, recent_artists=None, slot=0):
+    def wave_batch(self, n, history, recent_artists=None, slot=0, prev_path=None):
         with self.library.lock:
             items = {p: it for p, it in self.library.items.items()}
         items = {p: it for p, it in items.items() if os.path.isfile(p)} if len(items) < 3000 else items
+        flow = self.cfg.get("wave_flow", True)
         return wavemod.pick(items, self.stats.data.get("tracks") or {}, set(self.favorites()),
                             self.cfg.get("wave_dislikes") or {}, history, self.cfg.get("wave_mode", "mix"),
                             n=n, today_iso=datetime.date.today().isoformat(),
-                            mood=self.__dict__.get("_wave_mood"), recent_artists=recent_artists, slot=slot)
+                            mood=self.__dict__.get("_wave_mood"), recent_artists=recent_artists, slot=slot,
+                            feats=self.audiofeat.get if flow else None, prev_path=prev_path if flow else None)
+
+    def analyze_sound(self, first=()):
+        """В фоне, не торопясь, разобрать «характер звука» треков (один раз на файл)."""
+        if not self.cfg.get("wave_flow", True):
+            return
+        with self.library.lock:
+            items = {p: {"s": it.get("s", 0), "m": it.get("m", 0)} for p, it in self.library.items.items()}
+        self.audiofeat.analyze_all(items, enabled=lambda: self.cfg.get("wave_flow", True), first=first)
+
+    def toggle_wave_flow(self):
+        self.cfg["wave_flow"] = not self.cfg.get("wave_flow", True)
+        self.save_later()
+        self.analyze_sound()
 
     def wave_feedback(self, delta):
         """Реакция на текущий трек внутри этой волны (настроение сессии): −1 — переключил в начале / «не то»,
@@ -2426,7 +2445,10 @@ class Mp3Widget(QWidget):
             return
         self.stats.save()
         self._wave_mood = {}                      # новая волна — настроение с чистого листа
-        batch = self.wave_batch(20, [])
+        # волна продолжает то, что звучит сейчас: первый трек подбирается похожим на текущий
+        seed = self.loaded_path if (self.loaded_path and not self.radio) else None
+        batch = self.wave_batch(20, [seed] if seed else [], prev_path=seed)
+        self.analyze_sound(first=batch)
         if not batch:
             self.flash("НЕЧЕГО ПОСТАВИТЬ", 2.5)
             return
@@ -2443,7 +2465,8 @@ class Mp3Widget(QWidget):
             return
         recent = [libmod.track_view(self.files[i], self.library.items.get(self.files[i], {}))[1]
                   for i in self.order[-4:]]
-        more = self.wave_batch(15, list(self.files)[-400:], recent, slot=len(self.order))
+        more = self.wave_batch(15, list(self.files)[-400:], recent, slot=len(self.order),
+                               prev_path=self.files[self.order[-1]])
         for p in more:
             self.files.append(npath(p))
             self.order.append(len(self.files) - 1)
@@ -5291,6 +5314,8 @@ class Mp3Widget(QWidget):
         self._quitting = True
         if self.__dict__.get("library_win") is not None:
             self.library_win.hide()
+        self.audiofeat.stop()
+        self.audiofeat.save()
         if self.loud_worker is not None:
             self.loud_worker.stop()
             self.loud_cache.save()

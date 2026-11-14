@@ -108,8 +108,10 @@ def weight(path, it, mode, stats_tracks, aff, favs, dislikes, today_iso="", kind
 
 
 def pick(items, stats_tracks, favs, dislikes, history, mode="mix", n=20, last_artist="", rng=None, today_iso="",
-         mood=None, recent_artists=None, slot=0):
+         mood=None, recent_artists=None, slot=0, feats=None, prev_path=None):
     """n следующих треков. history — что уже звучало в этой волне (не повторять).
+    feats — функция путь → «характер звука» (audiofeat) или None; prev_path — после какого трека подбираем:
+    следующий берётся похожим по энергии и темпу, дальше — по цепочке, так что поток меняется плавно.
     mood — настроение сессии (mood_note); recent_artists — кто играл последним (для разрядки исполнителей);
     slot — сколько треков волна уже выдала (чтобы цикл «Микса» продолжался, а не начинался заново)."""
     rng = rng or random.Random()
@@ -127,9 +129,17 @@ def pick(items, stats_tracks, favs, dislikes, history, mode="mix", n=20, last_ar
                      mood_factor(mood, ak, libmod.norm(album)), it])
     if not pool and history:                            # всё переслушано — начинаем круг заново
         return pick(items, stats_tracks, favs, dislikes, [], mode, n, last_artist, rng, today_iso,
-                    mood, recent_artists, slot)
+                    mood, recent_artists, slot, feats, prev_path)
     recent = [libmod.norm(a) for a in (recent_artists or ([last_artist] if last_artist else []))][-ARTIST_GAP:]
     out = []
+    flow = None
+    if feats is not None:
+        import audiofeat
+        flow = audiofeat.flow_factor
+    for c in pool:
+        c.append(feats(c[0]) if flow else None)         # c[5] — характер звука (или None, если ещё не разобран)
+        c.append({})                                    # c[6] — уже посчитанные веса
+    pf = feats(prev_path) if (feats is not None and prev_path) else None
     while pool and len(out) < n:
         want = CYCLE[(slot + len(out)) % len(CYCLE)] if mode == "mix" else None
         cand = [c for c in pool if c[2] == want] if want else pool
@@ -142,7 +152,15 @@ def pick(items, stats_tracks, favs, dislikes, history, mode="mix", n=20, last_ar
             if free:
                 cand = free
                 break
-        ws = [weight(c[0], c[4], mode, stats_tracks, aff, favs, dislikes, today_iso, c[2], want) * c[3] for c in cand]
+        ws = []
+        for c in cand:                                  # вес трека для этого места цикла считаем один раз
+            w = c[6].get(want)
+            if w is None:
+                w = c[6][want] = weight(c[0], c[4], mode, stats_tracks, aff, favs, dislikes, today_iso,
+                                        c[2], want) * c[3]
+            ws.append(w)
+        if flow is not None and pf:                     # плавность: похожее на предыдущий трек — намного вероятнее
+            ws = [w * flow(pf, c[5]) for w, c in zip(ws, cand)]
         total = sum(ws)
         if total <= 0:
             choice = cand[0]
@@ -157,4 +175,6 @@ def pick(items, stats_tracks, favs, dislikes, history, mode="mix", n=20, last_ar
         pool.remove(choice)
         out.append(choice[0])
         recent = (recent + [choice[1]])[-ARTIST_GAP:]
+        if flow is not None and choice[5]:
+            pf = choice[5]
     return out
