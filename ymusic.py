@@ -304,8 +304,8 @@ def download(client, info, cache_dir, progress=None):
                 break
             f.write(chunk)
             got += len(chunk)
-            if progress and total:
-                progress(got / total)
+            if progress:
+                progress(got, total)                  # может бросить исключение — тогда отмена
     cover = None
     if info.get("cover"):
         try:

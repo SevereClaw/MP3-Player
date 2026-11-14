@@ -4,8 +4,9 @@
 import os
 import random
 import threading
+import time
 
-from PySide6.QtCore import Qt, QObject, QRectF, QPointF, QSize, QUrl, Signal
+from PySide6.QtCore import Qt, QObject, QRectF, QPointF, QSize, QTimer, QUrl, Signal
 from PySide6.QtGui import QPainter, QColor, QFont, QFontMetrics, QPen, QLinearGradient, QDesktopServices
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QListView, QFrame,
                                QStyledItemDelegate, QStyle, QAbstractItemView, QScrollArea)
@@ -70,9 +71,28 @@ class YTrackDelegate(QStyledItemDelegate):
             p.drawText(box, align, QFontMetrics(f).elidedText(s or "", Qt.TextElideMode.ElideRight, int(width)))
         text(22, w * 0.40, r.get("title"), pfont(15, weight=QFont.Weight.Bold), ink)
         text(30 + w * 0.42, w * 0.28, r.get("artist"), pfont(13, bold=False), dim)
-        text(36 + w * 0.71, w * 0.14, r.get("album"), pfont(12, bold=False), dim)
-        mark = "✓ НА ДИСКЕ" if r.get("path") else ("✖ НЕДОСТУПЕН" if not r.get("available", True) else "")
-        text(w * 0.86 - 20, w * 0.09, mark, pfont(10, bold=True), QColor("#6fe3a3") if r.get("path") else DIM)
+        text(36 + w * 0.71, w * 0.12, r.get("album"), pfont(12, bold=False), dim)
+        st = r.get("dl")
+        mx = w * 0.86 - 20
+        if st == "active":                                # качается прямо сейчас: полоска и проценты
+            frac = max(0.0, min(1.0, r.get("dl_p", 0.0)))
+            box = QRectF(bar.left() + mx, bar.center().y() - 4, w * 0.065, 8)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(255, 255, 255, 40) if not cur else QColor(10, 30, 70, 60))
+            p.drawPolygon(skew_poly(box, 3))
+            if frac > 0:
+                p.setBrush(QColor("#ffd34d"))
+                p.drawPolygon(skew_poly(QRectF(box.left(), box.top(), max(6.0, box.width() * frac), box.height()), 3))
+            text(mx + w * 0.07, w * 0.04, f"{int(frac * 100)}%", pfont(10, bold=True), QColor("#ffd34d"))
+        else:
+            mark, col = {"queue": ("В ОЧЕРЕДИ", DIM), "done": ("✓ СКАЧАН", QColor("#6fe3a3")),
+                         "fail": ("✖ НЕТ В ЯНДЕКСЕ", QColor("#ff6f91"))}.get(st, ("", DIM))
+            if not mark:
+                if r.get("path"):
+                    mark, col = "✓ НА ДИСКЕ", QColor("#6fe3a3")
+                elif not r.get("available", True):
+                    mark = "✖ НЕДОСТУПЕН"
+            text(mx, w * 0.11, mark, pfont(10, bold=True), col)
         d = r.get("duration") or 0
         text(w - 70, 56, fmt_ms(d * 1000) if d else "", pfont(14, weight=QFont.Weight.Bold), ink if cur else DIM,
              Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
@@ -212,6 +232,8 @@ class YandexPage(QWidget):
         self.status.setObjectName("count")
         self.status.setWordWrap(True)
         outer.addWidget(self.status)
+        self.dl = DownloadPanel(self)
+        outer.addWidget(self.dl)
         self._sync_login()
 
     # ------------------------------------------------------------------ фон
@@ -236,9 +258,6 @@ class YandexPage(QWidget):
         threading.Thread(target=work, daemon=True).start()
 
     def _done(self, j, res):
-        if j == -1:                                       # ход докачки
-            self.progress(*res)
-            return
         fn = self._jobs.pop(j, None)
         if isinstance(res, ymusic.NeedLogin):
             self.status.setText("Яндекс просит войти: " + str(res))
@@ -326,7 +345,14 @@ class YandexPage(QWidget):
         items = getattr(self.win, "items", {}) or {}
         m = ymusic.Matcher(items) if items else None
         cache = self.o.ystream.cache_dir
-        for t in tracks:                                  # что уже есть у тебя — играет с диска
+        run = getattr(self, "dl", None) and self.dl._run
+        if run:                                           # этот список сейчас качается — показать его ход
+            live = {(x.get("id") or "") + "|" + x.get("artist", "") + "|" + x.get("title", ""): x for x in run["tracks"]}
+            tracks = [live.get((t.get("id") or "") + "|" + t.get("artist", "") + "|" + t.get("title", ""), t)
+                      for t in tracks]
+        for t in tracks:
+            if t.get("dl") in ("active", "queue", "done"):
+                continue                                  # что уже есть у тебя — играет с диска
             t["path"] = (ymusic.cached(cache, t) if t.get("id") else None) or (m.find(t) if m else None)
         self.tracks, self.source, self.list_title = tracks, source, title
         self.model.set_rows(tracks)
@@ -399,14 +425,16 @@ class YandexPage(QWidget):
 
     # ------------------------------------------------------------------ импорт в медиатеку
     def import_playlist(self):
-        if not self.tracks or self._importing:
+        if not self.tracks:
+            return
+        if self.dl.running():
+            self.status.setText("Уже докачиваю другой плейлист — дождись или нажми «ОТМЕНА» на полосе загрузки.")
             return
         tracks = list(self.tracks)
         logged = bool(self.o.cfg.get("ym_token"))
         pls = self.win.playlists
         pl = pls.create(self.list_title or "Импорт", [t["path"] for t in tracks if t.get("path")])
-        pid = pl["id"]
-        missing = [t for t in tracks if not t.get("path")]
+        missing = [t for t in tracks if not t.get("path") and t.get("available", True)]
         if not missing or not logged:
             pl["missing"] = [f"{t['artist']} - {t['title']}" for t in missing]
             pls.save()
@@ -415,53 +443,361 @@ class YandexPage(QWidget):
                                 (f" Остальные {len(missing)} — после входа в Яндекс." if missing else ""))
             self.win.toast("ПЛЕЙЛИСТ СОЗДАН")
             return
-        self._importing = True
-        cl, cache = self.client(), self.o.ystream.cache_dir
-        prog = {"n": 0}
         self.win.toast("ПЛЕЙЛИСТ СОЗДАН — ДОКАЧИВАЮ")
+        self.dl.start(pl["id"], pl["name"], tracks, missing)
 
-        def work():
-            got, lost = {}, []
-            for t in missing:
-                try:
-                    found = ymusic.resolve(cl, t)
-                    if found:
-                        got[id(t)] = ymusic.download(cl, found, cache)
-                    else:
-                        lost.append(t)
-                except Exception:
-                    lost.append(t)
-                prog["n"] += 1
-                self.sig.done.emit(-1, (len(missing), prog["n"]))
-            return got, lost
-
-        def ok(res):
-            got, lost = res
-            self._importing = False
-            for p in got.values():
-                try:
-                    self.o.library.update(p)
-                except Exception:
-                    pass
-            p = pls.get(pid)
-            if p is not None:
-                p["tracks"] = [t["path"] if t.get("path") else got[id(t)] for t in tracks
-                               if t.get("path") or id(t) in got]
-                p["missing"] = [f"{t['artist']} - {t['title']}" for t in lost]
-                pls.save()
-            self.win.sync_playlists()
-            self.show_tracks(self.list_title, tracks, self.source)
-            self.status.setText(f"Готово: в плейлисте {len(tracks) - len(lost)} из {len(tracks)}." +
-                                (f" Не нашлось в Яндексе: {len(lost)}." if lost else ""))
-            self.win.toast("ПЛЕЙЛИСТ ГОТОВ")
-        self.run(work, ok, f"Докачиваю из Яндекса: 0 из {len(missing)}…")
-
-    # ------------------------------------------------------------------
-    def progress(self, total, n):
-        self.status.setText(f"Докачиваю из Яндекса: {n} из {total}…")
+    def scroll_to(self, t):
+        """Показать в списке строку трека (если открыт этот список)."""
+        for i, x in enumerate(self.tracks):
+            if x is t:
+                self.view.scrollTo(self.model.index(i, 0), QAbstractItemView.ScrollHint.PositionAtCenter)
+                return True
+        return False
 
     def showEvent(self, e):
         super().showEvent(e)
         self._sync_login()
         if self.o.cfg.get("ym_token") and self.account is None:
             self.load_account()
+
+
+# ====================================================================== полоса загрузки
+class _DlSig(QObject):
+    ev = Signal(object)
+
+
+class _Bar(QWidget):
+    """Скошенная полоса прогресса в стиле P3R: скачано / не нашлось."""
+
+    def __init__(self, h=12):
+        super().__init__()
+        self.setFixedHeight(h)
+        self.done = self.fail = 0.0
+
+    def set(self, done, fail):
+        self.done, self.fail = done, fail
+        self.update()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = QRectF(self.rect()).adjusted(2, 1, -2, -1)
+        sk = r.height() * 0.6
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(255, 255, 255, 30))
+        p.drawPolygon(skew_poly(r, sk))
+        if self.done > 0:
+            g = QLinearGradient(r.topLeft(), r.topRight())
+            g.setColorAt(0, WHITE)
+            g.setColorAt(0.5, ICE)
+            g.setColorAt(1, CYAN)
+            p.setBrush(g)
+            p.drawPolygon(skew_poly(QRectF(r.left(), r.top(), max(sk * 2, r.width() * self.done), r.height()), sk))
+        if self.fail > 0:
+            x = r.left() + r.width() * self.done
+            p.setBrush(QColor("#ff6f91"))
+            p.drawPolygon(skew_poly(QRectF(x, r.top(), max(sk * 2, r.width() * self.fail), r.height()), sk))
+        p.end()
+
+
+def _mb(n):
+    return f"{n / 1048576:.1f} МБ"
+
+
+def _dur(sec):
+    sec = int(sec)
+    if sec >= 3600:
+        return f"{sec // 3600} ч {sec % 3600 // 60} мин"
+    if sec >= 60:
+        return f"{sec // 60} мин"
+    return f"{sec} с"
+
+
+class DownloadPanel(QFrame):
+    """Что, куда и когда качается из Яндекса: общий прогресс, скорость, сколько осталось,
+    три текущих трека с процентами; пауза, отмена, папка."""
+    WORKERS = 3
+
+    def __init__(self, page):
+        super().__init__()
+        self.page = page
+        self.o = page.o
+        self.setObjectName("dlpanel")
+        self.setStyleSheet("#dlpanel { background: rgba(4, 14, 40, 200); border: 1px solid rgba(80, 200, 255, 90); }")
+        self.sig = _DlSig()
+        self.sig.ev.connect(self._on_ev)
+        self._run = None
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(12, 8, 12, 8)
+        lay.setSpacing(5)
+        top = QHBoxLayout()
+        top.setSpacing(6)
+        self.title = QLabel("")
+        self.title.setObjectName("sec")
+        top.addWidget(self.title)
+        top.addStretch(1)
+        self.nums = QLabel("")
+        self.nums.setObjectName("count")
+        self.b_show = P3Action("К ТЕКУЩЕЙ")
+        self.b_show.setToolTip("Прокрутить список к песне, которая сейчас качается")
+        self.b_show.clicked.connect(self.show_current)
+        self.b_folder = P3Action("ПАПКА")
+        self.b_folder.setToolTip("Открыть папку, куда падают песни")
+        self.b_folder.clicked.connect(self.open_folder)
+        self.b_pause = P3Action("ПАУЗА")
+        self.b_pause.clicked.connect(self.toggle_pause)
+        self.b_stop = P3Action("ОТМЕНА")
+        self.b_stop.setToolTip("Остановить: скачанное останется в плейлисте")
+        self.b_stop.clicked.connect(self.cancel)
+        self.b_close = P3Action("✕")
+        self.b_close.clicked.connect(self.hide)
+        for b in (self.b_show, self.b_folder, self.b_pause, self.b_stop, self.b_close):
+            top.addWidget(b)
+        lay.addLayout(top)
+        lay.addWidget(self.nums)
+        self.bar = _Bar(12)
+        lay.addWidget(self.bar)
+        self.where = QLabel("")
+        self.where.setObjectName("shint")
+        lay.addWidget(self.where)
+        self.rows = []
+        for _ in range(self.WORKERS):
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            name = QLabel("")
+            name.setObjectName("count")
+            b = _Bar(8)
+            b.setFixedWidth(160)
+            pct = QLabel("")
+            pct.setObjectName("count")
+            pct.setFixedWidth(130)
+            row.addWidget(name, 1)
+            row.addWidget(b)
+            row.addWidget(pct)
+            lay.addLayout(row)
+            self.rows.append((name, b, pct))
+        self.log = QLabel("")
+        self.log.setObjectName("shint")
+        self.log.setWordWrap(True)
+        lay.addWidget(self.log)
+        self.hide()
+
+    # ---------------------------------------------------------------- запуск
+    def running(self):
+        return bool(self._run and not self._run["finished"])
+
+    def start(self, pid, name, tracks, missing):
+        for t in missing:
+            t["dl"], t["dl_p"] = "queue", 0.0
+        run = {"pid": pid, "name": name, "tracks": tracks, "missing": missing, "next": 0, "lock": threading.Lock(),
+               "pause": threading.Event(), "cancel": False, "finished": False, "active": {}, "done": 0,
+               "fail": [], "bytes": 0, "speed": [], "t0": time.monotonic(), "since_save": 0, "last_save": time.monotonic(),
+               "alive": self.WORKERS, "recent": []}
+        run["pause"].set()
+        self._run = run
+        self.b_pause.setText("ПАУЗА")
+        self.b_pause.show()
+        self.b_stop.show()
+        self.b_show.show()
+        self.title.setText(f"⇩ ДОКАЧИВАЮ «{name.upper()}»")
+        self.where.setText(f"Куда: {self.o.ystream.cache_dir}   ·   плейлист «{name}» пополняется по ходу")
+        self.show()
+        cl, cache = self.page.client(), self.o.ystream.cache_dir
+        for _ in range(self.WORKERS):
+            threading.Thread(target=self._worker, args=(run, cl, cache), daemon=True).start()
+        self._tick = QTimer(self, interval=500)
+        self._tick.timeout.connect(self._refresh)
+        self._tick.start()
+        self._refresh()
+
+    def _worker(self, run, cl, cache):
+        emit = self.sig.ev.emit
+        while True:
+            run["pause"].wait()
+            if run["cancel"]:
+                break
+            with run["lock"]:
+                if run["next"] >= len(run["missing"]):
+                    break
+                t = run["missing"][run["next"]]
+                run["next"] += 1
+            emit(("start", run, t))
+            last = [0.0, 0]
+
+            def prog(got, total, t=t):
+                if run["cancel"]:
+                    raise InterruptedError("отменено")
+                now = time.monotonic()
+                if now - last[0] >= 0.15 or (total and got >= total):
+                    emit(("prog", run, t, got, total, got - last[1]))
+                    last[0], last[1] = now, got
+            try:
+                found = ymusic.resolve(cl, t)
+                if not found:
+                    emit(("fail", run, t, "нет в Яндекс Музыке"))
+                    continue
+                path = ymusic.download(cl, found, cache, progress=prog)
+                emit(("done", run, t, path))
+            except InterruptedError:
+                emit(("fail", run, t, "отменено"))
+                break
+            except ymusic.NeedLogin as e:
+                emit(("fail", run, t, str(e)))
+                run["cancel"] = True
+                break
+            except Exception as e:
+                emit(("fail", run, t, f"{e}"[:80] or type(e).__name__))
+        emit(("exit", run))
+
+    # ---------------------------------------------------------------- события
+    def _on_ev(self, ev):
+        kind, run = ev[0], ev[1]
+        if run is not self._run:
+            return
+        now = time.monotonic()
+        if kind == "start":
+            t = ev[2]
+            t["dl"], t["dl_p"] = "active", 0.0
+            run["active"][id(t)] = [t, 0, 0, now]
+        elif kind == "prog":
+            t, got, total, delta = ev[2:]
+            t["dl_p"] = got / total if total else 0.0
+            a = run["active"].get(id(t))
+            if a:
+                a[1], a[2] = got, total
+            run["bytes"] += max(0, delta)
+            run["speed"].append((now, max(0, delta)))
+        elif kind == "done":
+            t, path = ev[2], ev[3]
+            t["dl"], t["path"] = "done", path
+            run["active"].pop(id(t), None)
+            run["done"] += 1
+            run["since_save"] += 1
+            run["recent"].insert(0, f"✓ {t.get('artist', '')} — {t.get('title', '')}")
+            try:
+                self.o.library.update(path)
+            except Exception:
+                pass
+            if run["since_save"] >= 10 or now - run["last_save"] > 15:
+                self._save(run)
+        elif kind == "fail":
+            t, why = ev[2], ev[3]
+            run["active"].pop(id(t), None)
+            if why != "отменено":
+                t["dl"] = "fail"
+                run["fail"].append(t)
+                run["recent"].insert(0, f"✖ {t.get('artist', '')} — {t.get('title', '')}: {why}")
+            else:
+                t["dl"] = "queue"
+        elif kind == "exit":
+            run["alive"] -= 1
+            if run["alive"] <= 0:
+                self._finish(run)
+        del run["recent"][3:]
+        self.page.view.viewport().update()
+
+    def _save(self, run):
+        run["since_save"], run["last_save"] = 0, time.monotonic()
+        pls = self.page.win.playlists
+        p = pls.get(run["pid"])
+        if p is None:
+            return
+        p["tracks"] = [t["path"] for t in run["tracks"] if t.get("path")]
+        p["missing"] = [f"{t['artist']} - {t['title']}" for t in run["tracks"] if not t.get("path")]
+        pls.save()
+        self.page.win.sync_playlists()
+
+    def _finish(self, run):
+        run["finished"] = True
+        self._tick.stop()
+        for t in run["missing"]:
+            if t.get("dl") in ("queue", "active"):
+                t.pop("dl", None)
+        self._save(run)
+        n, f = len(run["missing"]), len(run["fail"])
+        took = _dur(time.monotonic() - run["t0"])
+        if run["cancel"]:
+            self.title.setText(f"■ ОСТАНОВЛЕНО «{run['name'].upper()}»")
+        else:
+            self.title.setText(f"✓ ГОТОВО «{run['name'].upper()}»")
+            self.page.win.toast("ПЛЕЙЛИСТ ГОТОВ")
+        self.nums.setText(f"скачано {run['done']} из {n}" + (f" · не нашлось {f}" if f else "") + f" · за {took}")
+        self.b_pause.hide()
+        self.b_stop.hide()
+        self.b_show.hide()
+        for name, b, pct in self.rows:
+            name.setText("")
+            b.set(0, 0)
+            pct.setText("")
+        if f:
+            lost = ", ".join(f"{t.get('artist', '')} — {t.get('title', '')}" for t in run["fail"][:6])
+            self.log.setText(f"Не нашлось в Яндексе: {lost}" + (f" и ещё {f - 6}" if f > 6 else ""))
+        self.page.view.viewport().update()
+
+    # ---------------------------------------------------------------- вид
+    def _refresh(self):
+        run = self._run
+        if not run or run["finished"]:
+            return
+        now = time.monotonic()
+        n = len(run["missing"])
+        handled = run["done"] + len(run["fail"])
+        run["speed"] = [x for x in run["speed"] if now - x[0] < 5]
+        span = max(1.0, min(5.0, now - run["t0"]))
+        bps = sum(x[1] for x in run["speed"]) / span
+        parts = [f"{handled} / {n}", f"{int(handled * 100 / max(1, n))} %", f"скачано {_mb(run['bytes'])}"]
+        if not run["pause"].is_set():
+            parts.append("на паузе")
+        else:
+            parts.append(f"{bps / 1048576:.1f} МБ/с")
+            if handled >= 3:
+                left = (now - run["t0"]) / handled * (n - handled)
+                parts.append(f"осталось ≈ {_dur(left)}")
+        if run["fail"]:
+            parts.append(f"не нашлось {len(run['fail'])}")
+        self.nums.setText("  ·  ".join(parts))
+        self.bar.set(run["done"] / max(1, n), len(run["fail"]) / max(1, n))
+        act = list(run["active"].values())
+        for k, (name, b, pct) in enumerate(self.rows):
+            if k < len(act):
+                t, got, total, t0 = act[k]
+                name.setText(f"▸ {t.get('artist', '')} — {t.get('title', '')}")
+                b.set(got / total if total else 0.0, 0)
+                pct.setText(f"{int(got * 100 / total)} % · {_mb(got)}" if total else "ищу в Яндексе…")
+            else:
+                name.setText("")
+                b.set(0, 0)
+                pct.setText("")
+        self.log.setText("   ".join(run["recent"]))
+
+    # ---------------------------------------------------------------- кнопки
+    def show_current(self):
+        run = self._run
+        act = list(run["active"].values()) if run else []
+        if act and not self.page.scroll_to(act[0][0]):
+            self.page.status.setText(f"Сейчас качается из «{run['name']}» — открой этот список, чтобы увидеть строку.")
+
+    def open_folder(self):
+        d = self.o.ystream.cache_dir
+        os.makedirs(d, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(d))
+
+    def toggle_pause(self):
+        run = self._run
+        if not run or run["finished"]:
+            return
+        if run["pause"].is_set():
+            run["pause"].clear()
+            self.b_pause.setText("ДАЛЬШЕ")
+        else:
+            run["pause"].set()
+            self.b_pause.setText("ПАУЗА")
+        self._refresh()
+
+    def cancel(self):
+        run = self._run
+        if not run or run["finished"]:
+            return
+        run["cancel"] = True
+        run["pause"].set()
+        self.title.setText("■ ОСТАНАВЛИВАЮ…")

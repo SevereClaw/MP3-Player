@@ -319,6 +319,40 @@ w.yandex.show_tracks("Мне нравится", _yt, "liked")
 print("на диске:", [t["title"] for t in _yt if t.get("path")])
 assert sum(1 for t in _yt if t.get("path")) == 3
 __import__("time").sleep(0.6); dump("lib_yandex.jpg")
+# докачка в медиатеку: видно, что и куда качается
+import ymusic as _ym
+def _fake_dl(cl, info, cache, progress=None):
+    import time as _t
+    for k in range(1, 11):
+        _t.sleep(0.12 if info["title"] != "Kick Back" else 0.5)
+        if progress:
+            progress(k * 400_000, 4_000_000)
+    os.makedirs(cache, exist_ok=True)
+    pth = os.path.join(cache, f"{info['artist']} - {info['title']}.mp3")
+    open(pth, "wb").write(b"x")
+    return pth
+_ym.download = _fake_dl
+_ym.resolve = lambda cl, t: None if t["title"] == "Idol" else t
+_yt2 = [dict(t, available=True) for t in _yt] + [{"id": str(100 + i), "title": f"Песня {i}", "artist": "Исполнитель", "album": "",
+                                                   "duration": 200, "available": True} for i in range(12)]
+w.yandex.show_tracks("Мне нравится", _yt2, "liked")
+w.yandex.client = lambda: object()
+w.yandex.import_playlist()
+_t0 = __import__("time").monotonic()
+while __import__("time").monotonic() - _t0 < 1.6:
+    app.processEvents(); __import__("time").sleep(0.02)
+w.yandex.dl._refresh()
+print("докачка:", w.yandex.dl.nums.text())
+dump("lib_yandex_dl.jpg")
+while w.yandex.dl.running() and __import__("time").monotonic() - _t0 < 30:
+    app.processEvents(); __import__("time").sleep(0.02)
+print("итог докачки:", w.yandex.dl.nums.text(), "|", w.yandex.dl.log.text())
+assert not w.yandex.dl.running()
+_pl = [p for p in w.playlists.items if p["name"] == "Мне нравится"][-1]
+print("в плейлисте:", len(_pl["tracks"]), "нет:", _pl.get("missing"))
+assert len(_pl["tracks"]) == len(_yt2) - 1
+dump("lib_yandex_dl_done.jpg")
+
 # пульт: играет Spotify, у нас тишина
 import external
 ext = external.Watcher(owner)
