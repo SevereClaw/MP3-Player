@@ -83,6 +83,11 @@ jobs:
           PYTHONIOENCODING: utf-8
         run: python tests/test_library.py
 
+      - name: My Wave picks tracks sensibly (cycle, artist spacing, forgotten, session mood)
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python tests/test_mywave.py
+
       - name: Unknown artists are found online (offline test with fake answers)
         env:
           PYTHONIOENCODING: utf-8

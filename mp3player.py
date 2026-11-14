@@ -1427,9 +1427,11 @@ class Mp3Widget(QWidget):
                 and time.monotonic() - self.__dict__.get("_wave_started", 0) < 30):
             d = self.cfg.setdefault("wave_dislikes", {})
             d[self.loaded_path] = round(float(d.get(self.loaded_path, 0)) + 0.5, 1)
+            self.wave_feedback(-1.0)                 # и до конца сессии — реже этого исполнителя и альбом
         # «Назад» после 3 секунд — в начало трека
         if delta < 0 and user and self.player.position() > 3000 and not self.radio:
             self.player.setPosition(0)
+            self.wave_feedback(+1.0)                 # вернул в начало — нравится, давай больше похожего
             return
         n = len(self.order)
         p = self.pos_in_order + delta
@@ -2379,13 +2381,40 @@ class Mp3Widget(QWidget):
     def wave_active(self):
         return self.cfg.get("smart") == "wave" and not self.radio
 
-    def wave_batch(self, n, history, last_artist=""):
+    def wave_batch(self, n, history, recent_artists=None, slot=0):
         with self.library.lock:
             items = {p: it for p, it in self.library.items.items()}
         items = {p: it for p, it in items.items() if os.path.isfile(p)} if len(items) < 3000 else items
         return wavemod.pick(items, self.stats.data.get("tracks") or {}, set(self.favorites()),
                             self.cfg.get("wave_dislikes") or {}, history, self.cfg.get("wave_mode", "mix"),
-                            n=n, last_artist=last_artist, today_iso=datetime.date.today().isoformat())
+                            n=n, today_iso=datetime.date.today().isoformat(),
+                            mood=self.__dict__.get("_wave_mood"), recent_artists=recent_artists, slot=slot)
+
+    def wave_feedback(self, delta):
+        """Реакция на текущий трек внутри этой волны (настроение сессии): −1 — переключил в начале / «не то»,
+        +1 — дослушал / вернул в начало. Уже набранная очередь пересобирается с учётом реакции."""
+        p = self.loaded_path
+        if not p or not self.wave_active():
+            return
+        _t, artist, album = libmod.track_view(p, self.library.items.get(p, {}))[:3]
+        wavemod.mood_note(self.__dict__.setdefault("_wave_mood", {}), artist, album, delta)
+        self.wave_requeue()
+
+    def wave_requeue(self):
+        """Выбросить ещё не сыгранный хвост волны и набрать его заново — по свежему настроению."""
+        if not self.wave_active() or not self.order:
+            return
+        tail = self.order[self.pos_in_order + 1:]
+        if not tail:
+            return
+        old_order, old_files = list(self.order), list(self.files)
+        del self.order[self.pos_in_order + 1:]
+        n = len(self.files)
+        if sorted(tail) == list(range(n - len(tail), n)):    # хвост очереди — это хвост списка: убрать и из него,
+            del self.files[n - len(tail):]                   # иначе несыгранное считалось бы «уже звучало»
+        self.wave_extend()
+        if len(self.order) - self.pos_in_order <= 1:         # набрать нечего (маленькая медиатека) — как было
+            self.order[:], self.files[:] = old_order, old_files
 
     def start_wave(self, mode=None):
         """Бесконечный поток своей музыки под настроение (как «Моя волна»)."""
@@ -2396,6 +2425,7 @@ class Mp3Widget(QWidget):
             self.flash("СОБИРАЮ МУЗЫКУ… ЕЩЁ РАЗ ЧЕРЕЗ МИНУТУ", 3.0)
             return
         self.stats.save()
+        self._wave_mood = {}                      # новая волна — настроение с чистого листа
         batch = self.wave_batch(20, [])
         if not batch:
             self.flash("НЕЧЕГО ПОСТАВИТЬ", 2.5)
@@ -2411,9 +2441,9 @@ class Mp3Widget(QWidget):
             return
         if len(self.order) - self.pos_in_order > 4:
             return
-        last = self.files[self.order[-1]] if self.order else ""
-        last_artist = libmod.track_view(last, self.library.items.get(last, {}))[1] if last else ""
-        more = self.wave_batch(15, list(self.files)[-400:], last_artist)
+        recent = [libmod.track_view(self.files[i], self.library.items.get(self.files[i], {}))[1]
+                  for i in self.order[-4:]]
+        more = self.wave_batch(15, list(self.files)[-400:], recent, slot=len(self.order))
         for p in more:
             self.files.append(npath(p))
             self.order.append(len(self.files) - 1)
@@ -2429,6 +2459,7 @@ class Mp3Widget(QWidget):
         d[p] = round(float(d.get(p, 0)) + 1, 1)
         self.save_later()
         self.flash("👎 РЕЖЕ ТАКОЕ", 1.5)
+        self.wave_feedback(-1.0)
         self.step(+1, user=False)
 
     def stop_wave(self):
@@ -2658,6 +2689,7 @@ class Mp3Widget(QWidget):
             elif self.repeat == "off" and self.pos_in_order >= len(self.order) - 1:
                 self.player.stop()
             else:
+                self.wave_feedback(+1.0)             # дослушал до конца — волна даёт больше похожего
                 self.step(+1, user=False)
 
     # ------------------------------------------------------------ повтор A–B
