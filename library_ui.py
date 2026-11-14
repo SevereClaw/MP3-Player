@@ -2859,6 +2859,162 @@ class TitleButton(QPushButton):
         p.end()
 
 
+class UpdateBadge(QWidget):
+    """Плашка обновления в заголовке медиатеки: какая сборка, проверка, скачивание с процентами,
+    «готово — обновить» и «обновляюсь…». Клик — проверить / поставить; ПКМ — что нового."""
+
+    def __init__(self, win):
+        super().__init__()
+        self.win = win
+        self.setFixedHeight(26)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setMouseTracking(True)
+        self.hover = False
+        self.t = 0.0
+        self.shown_p = 0.0
+        self._sig = ""
+        self.timer = QTimer(self, interval=33)
+        self.timer.timeout.connect(self._tick)
+        self.timer.start()
+
+    def owner(self):
+        return self.win.real_owner
+
+    def state(self):
+        """(вид, текст, доля 0..1, подсказка)."""
+        o = self.owner()
+
+        def val(name, default):
+            v = getattr(o, name, default)
+            return default if callable(v) else v
+        build = val("build", 0) or 0
+        st = str(val("upd_state", "") or "")
+        ready = val("upd_ready", None)
+        target = val("upd_target", None)
+        if not build:
+            return "dev", "ИЗ ИСХОДНИКОВ", 0.0, "Обновление работает в собранной программе"
+        if st == "installing":
+            return "install", f"ОБНОВЛЯЮСЬ ДО {target or ''}…".replace(" …", "…"), 1.0, "Сейчас программа перезапустится"
+        if ready:
+            return "ready", f"⬆ СБОРКА {ready[1]} ГОТОВА — ОБНОВИТЬ", 1.0, \
+                "Нажми — поставлю сейчас (музыка продолжится с того же места).\n" \
+                "Или сама поставится, когда музыка не будет играть пару минут."
+        if st.startswith("downloading"):
+            try:
+                pct = float(st.split()[-1].rstrip("%"))
+            except ValueError:
+                pct = 0.0
+            return "down", f"⬆ СКАЧИВАЮ СБОРКУ {target or ''} · {int(pct)}%", pct / 100, "Качаю новую версию"
+        if st == "checking":
+            return "check", "ПРОВЕРЯЮ ОБНОВЛЕНИЯ…", 0.0, ""
+        just = val("just_updated", None)
+        if just and time.monotonic() - just[1] < 180:
+            return "done", f"✓ ОБНОВЛЕНО ДО {build} · ЧТО НОВОГО", 0.0, "Нажми — список изменений"
+        err = val("upd_error", "")
+        if err:
+            return "error", "✖ НЕ ОБНОВИЛОСЬ · ЕЩЁ РАЗ", 0.0, err
+        return "idle", f"СБОРКА {build}", 0.0, "Нажми — проверить обновления.\nПКМ — что нового"
+
+    def sizeHint(self):
+        _k, text, _p, _tip = self.state()
+        return QSize(QFontMetrics(pfont(11)).horizontalAdvance(text) + 46, 26)
+
+    def _tick(self):
+        kind, text, frac, tip = self.state()
+        self.t += 0.033
+        self.shown_p += (frac - self.shown_p) * 0.15
+        sig = kind + text
+        if sig != self._sig:
+            self._sig = sig
+            self.setToolTip(tip)
+            self.updateGeometry()
+        if kind in ("check", "down", "ready", "install", "done") or self.hover or abs(frac - self.shown_p) > 0.002:
+            self.update()
+
+    def enterEvent(self, e):
+        self.hover = True
+        sfx("hover")
+        self.update()
+
+    def leaveEvent(self, e):
+        self.hover = False
+        self.update()
+
+    def mousePressEvent(self, e):
+        o = self.owner()
+        kind = self.state()[0]
+        if e.button() == Qt.MouseButton.RightButton:
+            o.show_whats_new(max(0, (o.build or 0) - 5), manual=True)
+            return
+        if e.button() != Qt.MouseButton.LeftButton:
+            return
+        sfx("select")
+        if kind == "ready":
+            o.install_update()
+        elif kind == "done":
+            o.show_whats_new(max(0, o.just_updated[0]), manual=True)
+            o.just_updated = None
+        elif kind in ("idle", "error"):
+            o.upd_error = ""
+            o.check_update(manual=True)
+
+    def mouseDoubleClickEvent(self, e):
+        e.accept()                                   # не разворачивать окно двойным кликом по плашке
+
+    def paintEvent(self, _e):
+        kind, text, _frac, _tip = self.state()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = QRectF(self.rect()).adjusted(4, 2, -4, -2)
+        sk = 8
+        bright = kind in ("ready", "install", "done")
+        if kind == "ready":                          # мигает, чтобы заметили
+            a = 0.55 + 0.45 * (0.5 + 0.5 * math.sin(self.t * 4))
+        else:
+            a = 1.0
+        p.setPen(Qt.PenStyle.NoPen)
+        if bright:
+            g = QLinearGradient(r.topLeft(), r.topRight())
+            c1, c2 = (QColor("#6fe3a3"), QColor("#2fd3ff")) if kind == "done" else (QColor(WHITE), QColor(CYAN))
+            c1.setAlphaF(a)
+            c2.setAlphaF(a)
+            g.setColorAt(0, c1)
+            g.setColorAt(1, c2)
+            p.setBrush(g)
+        else:
+            p.setBrush(QColor(47, 211, 255, 70 if self.hover else 34))
+        p.drawPolygon(skew_poly(r, sk))
+        if kind == "down" and self.shown_p > 0:      # заполняется по мере скачивания
+            fill = QRectF(r.left(), r.top(), max(sk * 2.0, r.width() * self.shown_p), r.height())
+            g = QLinearGradient(fill.topLeft(), fill.topRight())
+            g.setColorAt(0, QColor(255, 255, 255, 200))
+            g.setColorAt(1, QColor(47, 211, 255, 230))
+            p.setBrush(g)
+            p.drawPolygon(skew_poly(fill, sk))
+        if kind in ("check", "install", "down"):     # бегущая полоска «идёт работа»
+            x = r.left() + (self.t * 160) % (r.width() + 60) - 30
+            p.setClipRect(r)
+            p.setBrush(QColor(255, 255, 255, 70))
+            p.drawPolygon(skew_poly(QRectF(x, r.top(), 22, r.height()), sk))
+            p.setClipping(False)
+        p.setFont(pfont(11))
+        if kind == "down":                           # тёмный текст на заполненной части, светлый — на пустой
+            cut = r.left() + max(sk * 2.0, r.width() * self.shown_p)
+            p.setClipRect(QRectF(r.left() - 10, r.top(), cut - r.left() + 10, r.height()))
+            p.setPen(NAVY)
+            p.drawText(r, Qt.AlignmentFlag.AlignCenter, text)
+            p.setClipRect(QRectF(cut, r.top(), r.right() - cut + 10, r.height()))
+            p.setPen(WHITE)
+            p.drawText(r, Qt.AlignmentFlag.AlignCenter, text)
+            p.setClipping(False)
+        else:
+            pen = QColor("#ff6f91") if kind == "error" else (
+                NAVY if bright else (WHITE if self.hover else ICE))
+            p.setPen(pen)
+            p.drawText(r, Qt.AlignmentFlag.AlignCenter, text)
+        p.end()
+
+
 class TitleBar(QWidget):
     """Заголовок окна: тянуть — двигать (с прилипанием к краям Windows), двойной клик — на весь экран."""
 
@@ -2871,6 +3027,9 @@ class TitleBar(QWidget):
         lay.setContentsMargins(0, 0, 6, 0)
         lay.setSpacing(0)
         lay.addStretch(1)
+        self.badge = UpdateBadge(win)
+        lay.addWidget(self.badge)
+        lay.addSpacing(10)
         self.bmin, self.bmax, self.bclose = TitleButton("min"), TitleButton("max"), TitleButton("close")
         self.bmin.clicked.connect(win.showMinimized)
         self.bmax.clicked.connect(self.toggle_max)
