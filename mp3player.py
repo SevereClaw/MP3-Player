@@ -734,6 +734,7 @@ class Mp3Widget(QWidget):
         self.upd = UpdateSignals(self)
         self.upd.event.connect(self.on_update_event)
         self.upd_state, self.upd_ready, self.upd_manual = "", None, False
+        self.upd_target, self.upd_error, self.just_updated = None, "", None
         self.upd_idle_since = None
         self.upd_timer = QTimer(self, interval=60 * 1000)        # раз в минуту: пора ли?
         self.upd_timer.timeout.connect(self.update_tick)
@@ -1803,6 +1804,7 @@ class Mp3Widget(QWidget):
         self.cfg["last_seen_build"] = self.build
         self.save_later()
         if 0 < last < self.build:
+            self.just_updated = (last, time.monotonic())     # плашка в медиатеке: «✓ обновлено до …»
             self.show_whats_new(last)
 
     def show_whats_new(self, after, manual=False):
@@ -1844,6 +1846,7 @@ class Mp3Widget(QWidget):
         if self.upd_state in ("checking",) or self.upd_state.startswith("downloading"):
             return
         self.upd_state, self.upd_manual = "checking", manual
+        self.upd_error = ""
         if manual:
             self.flash("ПРОВЕРЯЮ ОБНОВЛЕНИЯ…")
         threading.Thread(target=self._update_worker, args=(manual,), daemon=True).start()
@@ -1884,10 +1887,14 @@ class Mp3Widget(QWidget):
             self.upd_state = ""
             if manual:
                 self.flash(f"ПОСЛЕДНЯЯ СБОРКА: {self.build}", 2.5)
+                win = self.__dict__.get("library_win")
+                if win is not None and win.isVisible():
+                    win.toast(f"У ТЕБЯ ПОСЛЕДНЯЯ СБОРКА — {self.build}")
         elif kind == "idle":
             self.upd_state = ""
         elif kind == "found":
             self.upd_state = "downloading 0%"
+            self.upd_target = data
             if manual:
                 self.flash(f"⬆ СКАЧИВАЮ СБОРКУ {data}", 2.5)
         elif kind == "progress":
@@ -1914,13 +1921,22 @@ class Mp3Widget(QWidget):
             return
         elif kind == "error":
             self.upd_state = ""
-            if manual:
+            self.upd_error = str(data)
+            win = self.__dict__.get("library_win")
+            if manual and win is not None and win.isVisible():
+                win.toast("НЕ ОБНОВИЛОСЬ — ПОДРОБНЕЕ НА ПЛАШКЕ СВЕРХУ")
+            elif manual:
                 QMessageBox.warning(None, APP_TITLE, f"Не удалось обновиться:\n{data}")
 
     def install_update(self, restart=True):
         if not self.upd_ready:
             return False
         new_dir, build = self.upd_ready
+        win = self.__dict__.get("library_win")
+        if restart and win is not None and win.isVisible() and self.upd_state != "installing":
+            self.upd_state, self.upd_target = "installing", build     # показать «обновляюсь…» и потом ставить
+            QTimer.singleShot(1200, lambda: self.install_update(restart))
+            return True
         self.upd_ready = None
         try:
             self.remember_position()
@@ -1929,6 +1945,8 @@ class Mp3Widget(QWidget):
             updater.apply_folder(new_dir, "MP3Player", "MP3Player.exe",
                                  restart_args=["--updated"], restart=restart)
         except Exception as e:
+            self.upd_state = ""
+            self.upd_error = str(e)
             QMessageBox.warning(None, APP_TITLE, f"Не удалось обновиться:\n{e}")
             return False
         if restart:

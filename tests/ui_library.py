@@ -304,6 +304,18 @@ w.search.setText("кино"); dump("lib_search.jpg")
 w.search.clear()
 w.go("settings"); dump("lib_settings.jpg")
 w.settings.scroll.verticalScrollBar().setValue(700); dump("lib_settings2.jpg")
+# ---- плашка обновления в заголовке
+owner.build, owner.upd_state, owner.upd_target, owner.upd_ready, owner.just_updated, owner.upd_error = 50, "downloading 45%", 51, None, None, ""
+for _ in range(40):
+    app.processEvents(); __import__("time").sleep(0.03)
+print("плашка:", w.titlebar.badge.state()[1])
+dump("lib_update_down.jpg")
+owner.upd_state, owner.upd_ready = "ready", ("x", 51)
+for _ in range(10):
+    app.processEvents(); __import__("time").sleep(0.03)
+dump("lib_update_ready.jpg")
+owner.upd_state, owner.upd_ready = "", None
+
 # ---- Яндекс и Spotify
 owner.ystream = types.SimpleNamespace(cache_dir=os.path.join(tmp, "yandex"), play=lambda *a, **k: None,
                                       play_wave=lambda: None)
