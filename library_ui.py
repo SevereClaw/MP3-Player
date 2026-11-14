@@ -2883,10 +2883,14 @@ class UpdateBadge(QWidget):
     def state(self):
         """(вид, текст, доля 0..1, подсказка)."""
         o = self.owner()
-        build = getattr(o, "build", 0) or 0
-        st = str(getattr(o, "upd_state", "") or "")
-        ready = getattr(o, "upd_ready", None)
-        target = getattr(o, "upd_target", None)
+
+        def val(name, default):
+            v = getattr(o, name, default)
+            return default if callable(v) else v
+        build = val("build", 0) or 0
+        st = str(val("upd_state", "") or "")
+        ready = val("upd_ready", None)
+        target = val("upd_target", None)
         if not build:
             return "dev", "ИЗ ИСХОДНИКОВ", 0.0, "Обновление работает в собранной программе"
         if st == "installing":
@@ -2903,10 +2907,10 @@ class UpdateBadge(QWidget):
             return "down", f"⬆ СКАЧИВАЮ СБОРКУ {target or ''} · {int(pct)}%", pct / 100, "Качаю новую версию"
         if st == "checking":
             return "check", "ПРОВЕРЯЮ ОБНОВЛЕНИЯ…", 0.0, ""
-        just = getattr(o, "just_updated", None)
+        just = val("just_updated", None)
         if just and time.monotonic() - just[1] < 180:
             return "done", f"✓ ОБНОВЛЕНО ДО {build} · ЧТО НОВОГО", 0.0, "Нажми — список изменений"
-        err = getattr(o, "upd_error", "")
+        err = val("upd_error", "")
         if err:
             return "error", "✖ НЕ ОБНОВИЛОСЬ · ЕЩЁ РАЗ", 0.0, err
         return "idle", f"СБОРКА {build}", 0.0, "Нажми — проверить обновления.\nПКМ — что нового"
