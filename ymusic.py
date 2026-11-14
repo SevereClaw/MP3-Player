@@ -191,21 +191,95 @@ def safe_name(s, limit=80):
     return re.sub(r"\s+", " ", s)[:limit].strip(" .") or "трек"
 
 
-def cache_path(cache_dir, info):
-    """Где лежит скачанный трек: <кэш>/<id>/Исполнитель - Название.mp3"""
+# ------------------------------------------------------------------ кэш: одна папка
+# Треки лежат прямо в <кэш>\Исполнитель - Название.mp3, а какой файл — какой трек Яндекса,
+# помнит <кэш>_index.json рядом (не внутри папки с музыкой).
+import threading as _th
+_idx_lock = _th.Lock()
+
+
+def _index_file(cache_dir):
+    return cache_dir.rstrip("\\/") + "_index.json"
+
+
+def load_index(cache_dir):
+    try:
+        with open(_index_file(cache_dir), "r", encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_index(cache_dir, idx):
+    f = _index_file(cache_dir)
+    try:
+        os.makedirs(os.path.dirname(f), exist_ok=True)
+        with open(f + ".tmp", "w", encoding="utf-8") as fh:
+            json.dump(idx, fh, ensure_ascii=False)
+        os.replace(f + ".tmp", f)
+    except OSError:
+        pass
+
+
+def cache_path(cache_dir, info, idx=None):
+    """Куда положить трек: <кэш>/Исполнитель - Название.mp3 (занято другим треком — с номером)."""
     stem = safe_name(f"{info.get('artist') or 'Неизвестный'} - {info.get('title') or 'трек'}", 120)
-    return os.path.join(cache_dir, safe_name(str(info["id"]), 40), stem + ".mp3")
+    taken = {v.lower() for k, v in (idx or {}).items() if k != str(info["id"])}
+    name = stem + ".mp3"
+    n = 2
+    while name.lower() in taken or os.path.exists(os.path.join(cache_dir, name)):
+        name = f"{stem} ({n}).mp3"
+        n += 1
+    return os.path.join(cache_dir, name)
 
 
 def cached(cache_dir, info):
-    d = os.path.join(cache_dir, safe_name(str(info["id"]), 40))
-    try:
-        for n in os.listdir(d):
-            if n.lower().endswith(".mp3") and os.path.getsize(os.path.join(d, n)) > 50_000:
-                return os.path.join(d, n)
-    except OSError:
-        pass
+    name = load_index(cache_dir).get(str(info.get("id")))
+    if name:
+        p = os.path.join(cache_dir, name)
+        try:
+            if os.path.getsize(p) > 50_000:
+                return p
+        except OSError:
+            pass
     return None
+
+
+def migrate_cache(cache_dir):
+    """Сборка 48 клала каждый трек в свою папку <кэш>/<id>/… — переносим всё в одну папку.
+    Возвращает {старый путь: новый}."""
+    moved = {}
+    try:
+        names = os.listdir(cache_dir)
+    except OSError:
+        return moved
+    with _idx_lock:
+        idx = load_index(cache_dir)
+        for d in names:
+            sub = os.path.join(cache_dir, d)
+            if not (d.isdigit() and os.path.isdir(sub)):
+                continue
+            for n in os.listdir(sub):
+                old = os.path.join(sub, n)
+                if not n.lower().endswith(".mp3") or str(d) in idx:
+                    continue
+                stem = n[:-4]
+                info = {"id": d, "artist": stem.split(" - ", 1)[0] if " - " in stem else "",
+                        "title": stem.split(" - ", 1)[1] if " - " in stem else stem}
+                new = cache_path(cache_dir, info, idx)
+                try:
+                    os.replace(old, new)
+                except OSError:
+                    continue
+                idx[str(d)] = os.path.basename(new)
+                moved[os.path.normpath(old)] = os.path.normpath(new)
+            try:
+                os.rmdir(sub)
+            except OSError:
+                pass
+        save_index(cache_dir, idx)
+    return moved
 
 
 def download(client, info, cache_dir, progress=None):
@@ -216,8 +290,7 @@ def download(client, info, cache_dir, progress=None):
     url, preview = client.download_url(info["id"])
     if preview and not client.token:
         raise NeedLogin("без входа Яндекс даёт только 30 секунд — войди в аккаунт")
-    target = cache_path(cache_dir, info)
-    os.makedirs(os.path.dirname(target), exist_ok=True)
+    os.makedirs(cache_dir, exist_ok=True)
     tmp_dir = cache_dir.rstrip("\\/") + "_tmp"              # не внутри медиатеки: недокачанное не попадёт в список
     os.makedirs(tmp_dir, exist_ok=True)
     tmp = os.path.join(tmp_dir, safe_name(str(info["id"]), 40) + ".mp3")
@@ -244,7 +317,12 @@ def download(client, info, cache_dir, progress=None):
         library.write_tags(tmp, info.get("title"), info.get("artist"), info.get("album"), cover=cover)
     except Exception:
         pass
-    os.replace(tmp, target)
+    with _idx_lock:                                   # имя выбираем в самом конце: параллельные загрузки
+        idx = load_index(cache_dir)
+        target = cache_path(cache_dir, info, idx)
+        os.replace(tmp, target)
+        idx[str(info["id"])] = os.path.basename(target)
+        save_index(cache_dir, idx)
     return target
 
 
