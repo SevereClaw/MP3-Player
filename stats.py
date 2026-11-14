@@ -49,11 +49,18 @@ class Stats:
         self.dirty = True
 
     # ------------------------------------------------------------ запись
-    def add_time(self, track, sec, title="", artist="", today=None):
+    def add_time(self, track, sec, title="", artist="", today=None, hour=None):
         if not track or sec <= 0:
             return
         t = self.data["tracks"].setdefault(track, {"sec": 0.0, "plays": 0})
         t["sec"] = t.get("sec", 0.0) + sec
+        # когда слушал: ночь / утро / день / вечер — «Моя волна» утром ставит одно, ночью другое
+        hp = t.get("hp")
+        if not isinstance(hp, list) or len(hp) != 4:
+            hp = t["hp"] = [0.0, 0.0, 0.0, 0.0]
+        hp[(_dt.datetime.now().hour if hour is None else int(hour)) % 24 // 6] += sec
+        if not self.data.get("hp_since"):
+            self.data["hp_since"] = (today or _dt.date.today()).isoformat()
         if title:
             t["title"] = title
         if artist:

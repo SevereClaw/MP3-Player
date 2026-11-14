@@ -2390,11 +2390,66 @@ class Mp3Widget(QWidget):
             items = {p: it for p, it in self.library.items.items()}
         items = {p: it for p, it in items.items() if os.path.isfile(p)} if len(items) < 3000 else items
         flow = self.cfg.get("wave_flow", True)
-        return wavemod.pick(items, self.stats.data.get("tracks") or {}, set(self.favorites()),
-                            self.cfg.get("wave_dislikes") or {}, history, self.cfg.get("wave_mode", "mix"),
-                            n=n, today_iso=datetime.date.today().isoformat(),
-                            mood=self.__dict__.get("_wave_mood"), recent_artists=recent_artists, slot=slot,
-                            feats=self.audiofeat.get if flow else None, prev_path=prev_path if flow else None)
+        why = {}
+        out = wavemod.pick(items, self.stats.data.get("tracks") or {}, set(self.favorites()),
+                           self.cfg.get("wave_dislikes") or {}, history, self.cfg.get("wave_mode", "mix"),
+                           n=n, today_iso=datetime.date.today().isoformat(),
+                           mood=self.__dict__.get("_wave_mood"), recent_artists=recent_artists, slot=slot,
+                           feats=self.audiofeat.get if flow else None, prev_path=prev_path if flow else None,
+                           hour=datetime.datetime.now().hour, tod_since=self.stats.data.get("hp_since") or "",
+                           reasons=why)
+        store = self.__dict__.setdefault("_wave_why", {})
+        for p, text in why.items():
+            store[pkey(p)] = text
+        while len(store) > 600:
+            store.pop(next(iter(store)))
+        return out
+
+    def wave_reason(self):
+        """Почему волна поставила текущий трек (короткая подпись) или ''."""
+        if not self.wave_active() or not self.loaded_path:
+            return ""
+        return (self.__dict__.get("_wave_why") or {}).get(pkey(self.loaded_path), "")
+
+    def start_wave_from_track(self):
+        """Волна от того, что играет сейчас: трек не прерывается, а дальше идёт тот же исполнитель,
+        альбом и похожее звучание. Нечего продолжать (радио, пусто) — обычная волна."""
+        seed = self.loaded_path
+        if not seed or self.radio or not os.path.isfile(seed) or not len(self.library):
+            self.start_wave()
+            return
+        seed = npath(seed)
+        self.stats.save()
+        _t, artist, album = libmod.track_view(seed, self.library.items.get(seed, {}))[:3]
+        mood = wavemod.mood_note({}, artist, album, +2.0)
+        if libmod.norm(artist) in (mood.get("a") or {}):
+            mood["seed"] = libmod.norm(artist)
+        self._wave_mood = mood
+        self._wave_why = {pkey(seed): "с него началась волна"}
+        batch = [npath(p) for p in self.wave_batch(20, [seed], recent_artists=[], prev_path=seed)]
+        if not batch:
+            self.flash("НЕЧЕГО ПОСТАВИТЬ", 2.5)
+            return
+        if self.shuffle:
+            self.toggle_shuffle()
+        self.remember_folder_state()
+        if not self.cfg.get("fav_mode"):
+            self.cfg["before_fav"] = self.current_folder()
+        self.files = [seed] + batch               # текущий трек остаётся играть — меняется только то, что после
+        self.order = list(range(len(self.files)))
+        self.pos_in_order = 0
+        self.cfg["radio"] = False
+        self.cfg["sources"] = list(self.files)
+        self.cfg["sources_flat"] = False
+        self.cfg["fav_mode"] = True
+        self.cfg["smart"] = "wave"
+        self._wave_started = time.monotonic() - 60          # этот трек выбран не волной — пропуск не штрафуем
+        if self.playlist_panel.isVisible():
+            self.playlist_panel.set_tracks(self.files, self.current_index())
+        self.analyze_sound(first=batch)
+        self.queue_loudness()
+        self.save_later()
+        self.flash("🌊 ВОЛНА ОТ ЭТОГО ТРЕКА", 2.5)
 
     def analyze_sound(self, first=()):
         """В фоне, не торопясь, разобрать «характер звука» треков (один раз на файл)."""

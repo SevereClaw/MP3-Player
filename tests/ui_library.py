@@ -229,6 +229,7 @@ w.now.wave.chips["fav"].click()
 print("волна по нажатию характера:", _wave)
 assert _wave == ["fav"], _wave
 w.now.repaint()                                           # клик по большой обложке — тоже запускает волну
+owner.start_wave_from_track = lambda: _wave.append("от трека")
 _c = w.now.cover_rect.center()
 app.sendEvent(w.now, QMouseEvent(QEvent.Type.MouseButtonPress, _c, w.now.mapToGlobal(_c),
                                  Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
@@ -263,6 +264,15 @@ assert len(w.now._parts) > 5, "частицы должны лететь"
 dump("lib_now_beat.jpg")
 w.now.set_picture(owner.loaded_path, None)
 assert w.covers.custom(owner.loaded_path) is None
+owner.wave_reason = lambda: "давно не слушал · 3 мес."     # подпись «почему этот трек» под названием
+w.now.repaint(); dump("lib_now_why.jpg")
+_seeded = []                                              # клик по обложке — волна от этого трека
+owner.start_wave_from_track = lambda: _seeded.append(owner.loaded_path)
+_c = w.now.cover_rect.center()
+app.sendEvent(w.now, QMouseEvent(QEvent.Type.MouseButtonPress, _c, w.now.mapToGlobal(_c),
+                                 Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+print("волна от трека:", _seeded)
+assert _seeded == [owner.loaded_path], _seeded
 _rep = []                                                 # кнопка повтора: список → трек → выкл
 owner.set_repeat = lambda m: (_rep.append(m), setattr(owner, "repeat", m))
 for _ in range(3):

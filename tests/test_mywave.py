@@ -157,6 +157,64 @@ o = mw.pick(only_calm, stats, set(), {}, [], "mix", n=10, rng=random.Random(3), 
             feats=feat.get, prev_path=heavy_seed)
 check("похожего нет — волна всё равно играет", len(o) == 10)
 
+# ---------- время суток: утром одно, вечером другое (после двух недель истории)
+tstats = {p: dict(v) for p, v in stats.items()}
+for p, v in tstats.items():
+    morning = ARTISTS.index(items[p]["a"]) < 6           # первых шестерых слушал утром, остальных вечером
+    v["hp"] = [0.0, 3000.0, 0.0, 300.0] if morning else [0.0, 300.0, 0.0, 3000.0]
+is_morning = lambda p: ARTISTS.index(items[p]["a"]) < 6  # noqa: E731
+
+
+def morning_share(hour, since):
+    c = tot = 0
+    for seed in range(40):
+        o = mw.pick(items, tstats, set(), {}, [], "fav", n=8, rng=random.Random(900 + seed), today_iso=TODAY,
+                    hour=hour, tod_since=since)
+        c += sum(1 for p in o if is_morning(p))
+        tot += len(o)
+    return c / tot
+
+
+m_am, m_pm = morning_share(8, "2026-10-01"), morning_share(21, "2026-10-01")
+check("утром — больше «утренних» исполнителей, вечером — меньше", m_am > 0.6 and m_pm < 0.4, f"{m_am:.0%} / {m_pm:.0%}")
+young = morning_share(8, "2026-11-08")
+check("истории меньше двух недель — время суток не влияет", abs(young - 0.5) < 0.1, f"{young:.0%}")
+check("без статистики по часам — не влияет", mw.tod_table(items, stats, 8, "2026-10-01", TODAY) == {})
+
+import stats as statsmod  # noqa: E402
+import tempfile  # noqa: E402
+import datetime as _d  # noqa: E402
+st = statsmod.Stats(os.path.join(tempfile.mkdtemp(), "stats.json"))
+st.add_time("x", 60.0, "T", "A", today=_d.date(2026, 11, 1), hour=7)
+st.add_time("x", 30.0, "T", "A", today=_d.date(2026, 11, 2), hour=23)
+check("статистика пишет время суток", st.data["tracks"]["x"]["hp"] == [0.0, 60.0, 0.0, 30.0]
+      and st.data["hp_since"] == "2026-11-01", st.data["tracks"]["x"].get("hp"))
+
+# ---------- подпись «почему этот трек»
+why = {}
+o = mw.pick(items, stats, {some[0]}, {}, [], "mix", n=40, rng=random.Random(11), today_iso=TODAY, reasons=why)
+check("подпись есть у каждого трека", set(why) == set(o) and all(why.values()))
+ko = dict(zip(o, kinds(o)))
+check("у забытого — «давно не слушал»", all(why[p].startswith("давно не слушал") for p in o if ko[p] == "old"),
+      next((why[p] for p in o if ko[p] == "old"), ""))
+check("у нового — «новое…» или «ещё не слушал»",
+      all(why[p] in ("новое от любимого исполнителя", "ещё не слушал") for p in o if ko[p] == "new"))
+seedp = some[0]
+mood = mw.mood_note({}, items[seedp]["a"], items[seedp]["al"], +2.0)
+mood["seed"] = library.norm(items[seedp]["a"])
+why = {}
+o = mw.pick(items, stats, set(), {}, [seedp], "mix", n=10, rng=random.Random(12), today_iso=TODAY,
+            mood=mood, recent_artists=[], reasons=why)
+same = [p for p in o if items[p]["a"] == items[seedp]["a"]]
+check("волна от трека: тот же исполнитель идёт сразу и ещё раз позже", artist(o[0]) == artist(seedp) and len(same) >= 2,
+      [artist(p) for p in o])
+check("…и подписан «тот же исполнитель»", all(why[p] == "тот же исполнитель" for p in same))
+check("…но не только он", len({artist(p) for p in o}) >= 5)
+why = {}
+o = mw.pick(items, tstats, set(), {}, [], "fav", n=10, rng=random.Random(13), today_iso=TODAY, hour=8,
+            tod_since="2026-10-01", reasons=why)
+check("подпись про время суток", any(v == "обычно слушаешь утром" for v in why.values()), sorted(set(why.values())))
+
 # ---------- «не то» дважды — трек больше не попадается
 ban = next(iter(items))
 o = mw.pick(items, stats, set(), {ban: 2}, [], "mix", n=120, rng=random.Random(9), today_iso=TODAY)

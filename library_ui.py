@@ -1635,12 +1635,14 @@ class NowPlaying(QWidget):
         """Клик по строке текста — перемотать на неё; клик по обложке — запустить «Мою волну»."""
         if e.button() == Qt.MouseButton.LeftButton and self.cover_rect.contains(e.position()):
             sfx("select")
-            if self.wave.active():
-                self.win.toast("МОЯ ВОЛНА УЖЕ ИГРАЕТ")
+            o = self.win.owner
+            if callable(getattr(o, "start_wave_from_track", None)) and getattr(o, "loaded_path", None):
+                o.start_wave_from_track()               # волна от того, что играет: трек не прерывается
+                self.win.toast("🌊 ВОЛНА ОТ ЭТОГО ТРЕКА")
             else:
-                self.win.owner.start_wave(self.win.owner.cfg.get("wave_mode", "mix"))
+                o.start_wave(o.cfg.get("wave_mode", "mix"))
                 self.win.toast("🌊 МОЯ ВОЛНА")
-                QTimer.singleShot(100, self.wave.sync)
+            QTimer.singleShot(100, self.wave.sync)
             return
         t = self._line_at(e.position())
         if t is not None and e.button() == Qt.MouseButton.LeftButton:
@@ -1879,10 +1881,20 @@ class NowPlaying(QWidget):
             p.setFont(pfont(20))
             p.setPen(NAVY)
             p.drawText(band.adjusted(18, 0, -10, 0), Qt.AlignmentFlag.AlignVCenter, artist)
+        ax = x + 2
         if album:
             p.setFont(pfont(14, bold=False))
             p.setPen(DIM)
-            p.drawText(QPointF(x + 2, 206), album)
+            alb = QFontMetrics(p.font()).elidedText(album, Qt.TextElideMode.ElideRight, int(w * 0.6))
+            p.drawText(QPointF(ax, 206), alb)
+            ax += QFontMetrics(p.font()).horizontalAdvance(alb) + 14
+        why = getattr(o, "wave_reason", None)
+        why = why() if callable(why) else ""
+        if why:                                                       # «Моя волна»: почему этот трек
+            p.setFont(pfont(13))
+            p.setPen(CYAN)
+            p.drawText(QPointF(ax, 206), QFontMetrics(p.font()).elidedText(
+                "🌊 " + why, Qt.TextElideMode.ElideRight, int(max(60, x + w - ax))))
 
         # текст песни
         lyr = getattr(o, "lyrics", None)

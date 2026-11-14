@@ -19,6 +19,7 @@ MODES = {
 
 FORGOT_DAYS = 30               # столько не звучало — «забытое»
 CYCLE = ("known", "known", "new", "old")   # «Микс»: два знакомых → новый → забытый
+SEED_BOOST = 120               # «волна от трека»: во столько раз чаще исполнитель, с которого она началась
 ARTIST_GAP = 4                 # один исполнитель — не чаще раза в пять треков
 
 
@@ -41,6 +42,81 @@ def mood_factor(mood, artist_key, album_key):
         return 1.0
     s = 0.9 * (mood.get("a") or {}).get(artist_key, 0.0) + 0.6 * (mood.get("al") or {}).get(album_key, 0.0)
     return max(0.08, min(4.0, 2.0 ** s))
+
+
+# ------------------------------------------------------------------ время суток
+PARTS = ("ночью", "утром", "днём", "вечером")          # 0–6, 6–12, 12–18, 18–24
+TOD_DAYS = 14                  # столько дней истории нужно, чтобы верить «утром одно, вечером другое»
+
+
+def tod_table(items, stats_tracks, hour, since_iso, today_iso):
+    """Исполнитель → множитель для этого времени суток (0.6..1.6). Пусто, пока истории мало."""
+    if hour is None or not since_iso:
+        return {}
+    import datetime
+    try:
+        day = datetime.date.fromisoformat(today_iso) if today_iso else datetime.date.today()
+        if (day - datetime.date.fromisoformat(since_iso)).days < TOD_DAYS:
+            return {}
+    except ValueError:
+        return {}
+    part = int(hour) % 24 // 6
+    by, total = {}, [0.0, 0.0, 0.0, 0.0]
+    for path, t in stats_tracks.items():
+        hp = t.get("hp")
+        if not isinstance(hp, list) or len(hp) != 4:
+            continue
+        it = items.get(path)
+        k = libmod.norm(libmod.track_view(path, it)[1] if it else (t.get("artist") or ""))
+        if not k:
+            continue
+        acc = by.setdefault(k, [0.0, 0.0, 0.0, 0.0])
+        for i in range(4):
+            acc[i] += hp[i]
+            total[i] += hp[i]
+    if sum(total) < 5 * 3600:                           # меньше пяти часов музыки — рано делать выводы
+        return {}
+    base = total[part] / sum(total)
+    out = {}
+    for k, acc in by.items():
+        if sum(acc) < 20 * 60:                          # исполнителя почти не слушал — не судим
+            continue
+        ratio = (acc[part] / sum(acc) + 0.1) / (base + 0.1)
+        out[k] = max(0.6, min(1.6, ratio))
+    return out
+
+
+def _why(c, stats_tracks, aff, favs, mood, tod, hour, flow_now, cutoff_iso, today_iso):
+    """Короткое «почему этот трек» — для подписи на экране."""
+    path, ak, kind = c[0], c[1], c[2]
+    t = stats_tracks.get(path) or {}
+    m = (mood or {}).get("a", {}).get(ak, 0.0)
+    if (mood or {}).get("seed") == ak and ak:
+        return "тот же исполнитель"
+    if m >= 1:
+        return "тебе сейчас это заходит"
+    if kind == "old":
+        last = t.get("last") or ""
+        try:
+            import datetime
+            days = (datetime.date.fromisoformat(today_iso) - datetime.date.fromisoformat(last)).days
+            ago = f" · {days // 30} мес." if days >= 60 else " · больше месяца"
+        except ValueError:
+            ago = ""
+        return "давно не слушал" + ago
+    if kind == "new":
+        return "новое от любимого исполнителя" if aff.get(ak, 0.0) >= 0.4 else "ещё не слушал"
+    if path in favs:
+        return "в избранном ♥"
+    if hour is not None and tod.get(ak, 1.0) >= 1.25:
+        return "обычно слушаешь " + PARTS[int(hour) % 24 // 6]
+    if float(t.get("sec") or 0.0) >= 900:
+        return "часто слушаешь"
+    if flow_now is not None and flow_now >= 0.8:
+        return "похоже по звучанию на предыдущий"
+    if aff.get(ak, 0.0) >= 0.5:
+        return "любимый исполнитель"
+    return "из твоей музыки"
 
 
 def kind_of(path, t, favs, cutoff_iso):
@@ -108,8 +184,11 @@ def weight(path, it, mode, stats_tracks, aff, favs, dislikes, today_iso="", kind
 
 
 def pick(items, stats_tracks, favs, dislikes, history, mode="mix", n=20, last_artist="", rng=None, today_iso="",
-         mood=None, recent_artists=None, slot=0, feats=None, prev_path=None):
+         mood=None, recent_artists=None, slot=0, feats=None, prev_path=None,
+         hour=None, tod_since="", reasons=None):
     """n следующих треков. history — что уже звучало в этой волне (не повторять).
+    hour — который час (для «утром одно, ночью другое»; работает после двух недель истории, tod_since —
+    с какого дня она копится); reasons — словарь, куда сложить подпись «почему этот трек» для каждого пути.
     feats — функция путь → «характер звука» (audiofeat) или None; prev_path — после какого трека подбираем:
     следующий берётся похожим по энергии и темпу, дальше — по цепочке, так что поток меняется плавно.
     mood — настроение сессии (mood_note); recent_artists — кто играл последним (для разрядки исполнителей);
@@ -118,18 +197,22 @@ def pick(items, stats_tracks, favs, dislikes, history, mode="mix", n=20, last_ar
     aff = _artist_affinity(items, stats_tracks)
     cutoff = _cutoff(today_iso)
     unknown = libmod.norm(libmod.UNKNOWN_ARTIST)
+    tod = tod_table(items, stats_tracks, hour, tod_since, today_iso)
     seen = {os.path.normcase(p) for p in history}
+    seed_artist = (mood or {}).get("seed")
     pool = []                                           # [путь, исполнитель, вид, множитель настроения, элемент]
     for p, it in items.items():
         if os.path.normcase(p) in seen or float(dislikes.get(p, 0) or 0) >= 2:
             continue
         _t, artist, album = libmod.track_view(p, it)[:3]
         ak = libmod.norm(artist)
-        pool.append([p, ak, kind_of(p, stats_tracks.get(p), favs, cutoff),
-                     mood_factor(mood, ak, libmod.norm(album)), it])
+        mf = mood_factor(mood, ak, libmod.norm(album)) * tod.get(ak, 1.0)
+        if seed_artist and ak == seed_artist:           # волна от трека: его исполнитель — при каждой возможности
+            mf *= SEED_BOOST
+        pool.append([p, ak, kind_of(p, stats_tracks.get(p), favs, cutoff), mf, it])
     if not pool and history:                            # всё переслушано — начинаем круг заново
         return pick(items, stats_tracks, favs, dislikes, [], mode, n, last_artist, rng, today_iso,
-                    mood, recent_artists, slot, feats, prev_path)
+                    mood, recent_artists, slot, feats, prev_path, hour, tod_since, reasons)
     recent = [libmod.norm(a) for a in (recent_artists or ([last_artist] if last_artist else []))][-ARTIST_GAP:]
     out = []
     flow = None
@@ -159,8 +242,10 @@ def pick(items, stats_tracks, favs, dislikes, history, mode="mix", n=20, last_ar
                 w = c[6][want] = weight(c[0], c[4], mode, stats_tracks, aff, favs, dislikes, today_iso,
                                         c[2], want) * c[3]
             ws.append(w)
+        fl = None
         if flow is not None and pf:                     # плавность: похожее на предыдущий трек — намного вероятнее
-            ws = [w * flow(pf, c[5]) for w, c in zip(ws, cand)]
+            fl = [flow(pf, c[5]) for c in cand]
+            ws = [w * f for w, f in zip(ws, fl)]
         total = sum(ws)
         if total <= 0:
             choice = cand[0]
@@ -174,6 +259,10 @@ def pick(items, stats_tracks, favs, dislikes, history, mode="mix", n=20, last_ar
                     break
         pool.remove(choice)
         out.append(choice[0])
+        if reasons is not None:
+            f_now = fl[cand.index(choice)] if (fl is not None and choice[5]) else None
+            reasons[choice[0]] = _why(choice, stats_tracks, aff, favs, mood, tod, hour, f_now, cutoff,
+                                      today_iso or __import__("datetime").date.today().isoformat())
         recent = (recent + [choice[1]])[-ARTIST_GAP:]
         if flow is not None and choice[5]:
             pf = choice[5]
