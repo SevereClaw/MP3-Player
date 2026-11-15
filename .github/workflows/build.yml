@@ -32,7 +32,7 @@ jobs:
           python -m pip install -r requirements.txt pyinstaller
 
       - name: Check that all modules import
-        run: python -c "import mp3player, skin_editor, lyrics, geom3d, radio, doulander_link, updater, lyrics_online, loudness, eq, dsp_player, weekly, weekly_ui, smart, lrc_maker, media_keys, panels, stats, spectrum, audio_engine, desktop_keeper, winassoc, fullscreen, audiofeat, mywave; fullscreen.background_thread(); print('игра на экране:', fullscreen.game_running())"
+        run: python -c "import mp3player, skin_editor, lyrics, geom3d, radio, doulander_link, updater, lyrics_online, loudness, eq, dsp_player, weekly, weekly_ui, smart, lrc_maker, media_keys, panels, stats, spectrum, audio_engine, desktop_keeper, winassoc, fullscreen, audiofeat, mywave; fullscreen.background_thread(); print('fullscreen game:', fullscreen.game_running())"
 
       - name: Updater self-test (replaces files like a real update)
         env:
