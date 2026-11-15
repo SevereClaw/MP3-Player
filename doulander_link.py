@@ -148,6 +148,30 @@ def build_command(folder, s, url, out_dir, cookies=None):
     return cmd, proxy
 
 
+# yt-dlp пишет картинку-обложку рядом с будущим файлом и после вшивания удаляет. Если трек
+# не скачался, картинка остаётся в папке с музыкой — убираем то, что он записал и не убрал.
+THUMB_LINE = re.compile(r"^\[info\] Writing .*?thumbnail.*? to: (.+)$")
+THUMB_EXTS = (".jpg", ".jpeg", ".png", ".webp")
+
+
+def remove_leftover_thumbnails(thumbs, folder="", keep=()):
+    kept = {os.path.normcase(os.path.abspath(k)) for k in keep if k}
+    removed = 0
+    for t in dict.fromkeys(thumbs):
+        path = t if os.path.isabs(t) else os.path.join(folder or "", t)
+        stem = os.path.splitext(path)[0]
+        for ext in THUMB_EXTS:
+            f = stem + ext
+            if os.path.normcase(os.path.abspath(f)) in kept or not os.path.isfile(f):
+                continue
+            try:
+                os.remove(f)
+                removed += 1
+            except OSError:
+                pass
+    return removed
+
+
 def tidy_lyrics(path):
     """«Трек.ru.lrc» → «Трек.lrc» (так его сразу находит плеер)."""
     stem = os.path.splitext(path)[0]
@@ -279,7 +303,7 @@ class DoulanderJobs(QObject):
                                              creationflags=NO_WINDOW)
         except OSError as e:
             return 1, f"не запускается yt-dlp из Doulander: {e}", []
-        tail, files, last = [], [], -10.0
+        tail, files, last, thumbs = [], [], -10.0, []
         for raw in p.stdout:
             line = ANSI.sub("", raw.decode("utf-8", "replace")).strip()
             if line.startswith("[P]"):
@@ -296,6 +320,11 @@ class DoulanderJobs(QObject):
                 files.append(line[3:].strip())
             elif line:
                 tail = (tail + [line])[-40:]
+                m = THUMB_LINE.match(line)
+                if m:
+                    thumbs.append(m.group(1).strip())
         p.wait()
         files = [f for f in files if os.path.isfile(f)]
+        out_dir = cmd[cmd.index("-P") + 1] if "-P" in cmd else ""
+        remove_leftover_thumbnails(thumbs, out_dir, keep=files)      # трек не скачался — обложка не остаётся
         return p.returncode, "\n".join(tail), files
