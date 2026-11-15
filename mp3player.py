@@ -44,6 +44,7 @@ import smart
 import library as libmod
 import mywave as wavemod
 import audiofeat
+import fullscreen
 
 APP_NAME = "MP3Player"
 APP_TITLE = "MP3 Плеер"
@@ -2457,7 +2458,8 @@ class Mp3Widget(QWidget):
             return
         with self.library.lock:
             items = {p: {"s": it.get("s", 0), "m": it.get("m", 0)} for p, it in self.library.items.items()}
-        self.audiofeat.analyze_all(items, enabled=lambda: self.cfg.get("wave_flow", True), first=first)
+        self.audiofeat.analyze_all(items, enabled=lambda: self.cfg.get("wave_flow", True), first=first,
+                                   hold=fullscreen.game_running)
 
     def toggle_wave_flow(self):
         self.cfg["wave_flow"] = not self.cfg.get("wave_flow", True)
@@ -2957,7 +2959,9 @@ class Mp3Widget(QWidget):
                                         lambda w: WinDesktop.apply(w, self.on_desktop))
         # «Сейчас играет» в углу экрана
         mode = self.cfg.get("toast", "hidden")
-        if time.monotonic() < self._announce_until and (
+        # поверх игры окно не показываем: из-за него Windows пересобирает экран и в игре падает FPS
+        in_game = self.cfg.get("toast_no_games", True) and fullscreen.game_running()
+        if not in_game and time.monotonic() < self._announce_until and (
                 mode == "always" or (mode == "hidden" and not self.isVisible()
                                      and not self.mini.isVisible())):
             i = self.current_index()
@@ -4434,6 +4438,10 @@ class Mp3Widget(QWidget):
             a.setCheckable(True)
             tgrp.addAction(a)
             self.toast_actions[key] = a
+        tm.addSeparator()
+        self.act_toast_games = tm.addAction("Не показывать поверх игр (чтобы не падал FPS)", self.toggle_toast_games)
+        self.act_toast_games.setCheckable(True)
+        self.act_toast_games.setChecked(bool(self.cfg.get("toast_no_games", True)))
 
         self.act_dc = st_m.addAction("🎮  Показывать в Discord (Music → Discord)", self.toggle_discord_link)
         self.act_dc.setCheckable(True)
@@ -5316,6 +5324,12 @@ class Mp3Widget(QWidget):
             self.cfg.pop("resume", None)
         self.flash("ЗАКЛАДКИ: ВКЛ" if on else "ЗАКЛАДКИ: ВЫКЛ")
         self.save_later()
+
+    def toggle_toast_games(self):
+        self.cfg["toast_no_games"] = not self.cfg.get("toast_no_games", True)
+        self.act_toast_games.setChecked(bool(self.cfg["toast_no_games"]))
+        self.save_later()
+        self.flash("ПОВЕРХ ИГР: " + ("НЕ ПОКАЗЫВАТЬ" if self.cfg["toast_no_games"] else "ПОКАЗЫВАТЬ"), 2.0)
 
     def set_toast_mode(self, mode):
         self.cfg["toast"] = mode

@@ -193,8 +193,9 @@ class FeatureStore:
     def stop(self):
         self._stop = True
 
-    def analyze_all(self, items, enabled=lambda: True, first=(), analyzer=None, rest=2.0):
+    def analyze_all(self, items, enabled=lambda: True, first=(), analyzer=None, rest=2.0, hold=None):
         """В фоне разобрать всё, что ещё не разобрано. items — {путь: {"s": размер, "m": время}}.
+        hold() == True — подождать (идёт игра: процессор ей нужнее).
         first — пути, которые нужны раньше других (очередь волны). rest — во сколько раз дольше
         отдыхать, чем работать: разбор не должен греть процессор."""
         if self.busy or np is None:
@@ -215,7 +216,14 @@ class FeatureStore:
         def work():
             last_save = time.time()
             try:
+                import fullscreen
+                fullscreen.background_thread()               # процессор и диск — в последнюю очередь
+            except Exception:
+                pass
+            try:
                 for p in todo:
+                    while hold is not None and hold() and not self._stop:
+                        time.sleep(5.0)                      # игра на экране — не мешаем
                     if self._stop or not enabled():
                         break
                     it = items.get(p) or {}
