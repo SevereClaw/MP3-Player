@@ -98,6 +98,11 @@ jobs:
           PYTHONIOENCODING: utf-8
         run: python tests/test_lyricsify.py
 
+      - name: Seek bar jumps to the click point
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python tests/test_seek_slider.py
+
       - name: Unknown artists are found online (offline test with fake answers)
         env:
           PYTHONIOENCODING: utf-8

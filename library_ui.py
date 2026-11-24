@@ -21,6 +21,33 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineE
 
 import library as libmod
 
+# ---------------------------------------------------------------- ползунок «куда нажал — туда и встал»
+class SeekSlider(QSlider):
+    """Обычный QSlider по клику мимо ручки сдвигается лишь на шаг. Здесь ручка сразу прыгает в точку
+    клика, и её можно тут же тянуть дальше; отпускание — как после перетаскивания (sliderReleased)."""
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton and self.maximum() > self.minimum():
+            from PySide6.QtWidgets import QStyleOptionSlider
+            opt = QStyleOptionSlider()
+            self.initStyleOption(opt)
+            st = self.style()
+            handle = st.subControlRect(QStyle.ComplexControl.CC_Slider, opt, QStyle.SubControl.SC_SliderHandle, self)
+            pos = e.position().toPoint()
+            if not handle.contains(pos):
+                groove = st.subControlRect(QStyle.ComplexControl.CC_Slider, opt, QStyle.SubControl.SC_SliderGroove, self)
+                if self.orientation() == Qt.Orientation.Horizontal:
+                    span = max(1, groove.width() - handle.width())
+                    x = pos.x() - groove.x() - handle.width() // 2
+                else:
+                    span = max(1, groove.height() - handle.height())
+                    x = pos.y() - groove.y() - handle.height() // 2
+                v = QStyle.sliderValueFromPosition(self.minimum(), self.maximum(), max(0, min(span, x)), span,
+                                                   opt.upsideDown)
+                self.setValue(v)                 # ручка теперь под курсором — дальше Qt ведёт её как при перетаскивании
+        super().mousePressEvent(e)
+
+
 # ---------------------------------------------------------------- палитра P3R
 NAVY = QColor("#061331")
 NAVY2 = QColor("#0b2257")
@@ -2229,7 +2256,7 @@ class PlayerBar(QWidget):
         self.cur.setObjectName("time")
         self.tot = QLabel("0:00")
         self.tot.setObjectName("time")
-        self.seek = QSlider(Qt.Orientation.Horizontal)
+        self.seek = SeekSlider(Qt.Orientation.Horizontal)
         self.seek.setRange(0, self.SEEK_MAX)
         self.seek.sliderReleased.connect(self._seek)
         self._dragging = False
@@ -2239,7 +2266,7 @@ class PlayerBar(QWidget):
         prog.addWidget(self.tot)
         mid.addLayout(prog)
         lay.addLayout(mid, 1)
-        self.vol = QSlider(Qt.Orientation.Horizontal)
+        self.vol = SeekSlider(Qt.Orientation.Horizontal)
         self.vol.setRange(0, 100)
         self.vol.setFixedWidth(100)
         self.vol.valueChanged.connect(lambda v: (win.owner.player.setVolume(v / 100), win.owner.save_later()))
