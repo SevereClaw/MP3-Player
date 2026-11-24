@@ -114,4 +114,20 @@ badge.hide()
 print("flags lyrics:", int(ly.windowFlags()), "card:", int(card.windowFlags()))
 print("transparent for input:", bool(card.windowFlags() & Qt.WindowType.WindowTransparentForInput))
 card.cancel()
+# Ctrl+Alt: чистое нажатие закрепляет / открепляет, Ctrl+Alt+G (горячая клавиша плеера) — нет
+pressed = set()
+go.GameLyrics._key = staticmethod(lambda vk: vk in pressed)
+lk = go.GameLyrics()
+lk.show()
+events = []
+lk.lock_toggled.connect(events.append)
+def poll(keys):
+    pressed.clear(); pressed.update(keys); lk._poll_ctrl()
+poll({0x11}); edit_on_ctrl = lk.edit
+poll({0x11, 0x12}); poll(set())
+poll({0x11, 0x12}); poll({0x11, 0x12, 0x47}); poll(set())
+poll({0x11}); edit_when_locked = lk.edit
+poll(set())
+print("LOCK events:", events, "| edit on Ctrl:", edit_on_ctrl, "| edit on Ctrl while locked:", edit_when_locked, flush=True)
+assert events == [True] and edit_on_ctrl and not edit_when_locked
 print("DONE")
