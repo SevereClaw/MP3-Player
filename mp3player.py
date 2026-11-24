@@ -2857,6 +2857,38 @@ class Mp3Widget(QWidget):
         self.save_later()
         self.flash("КАРТОЧКА ТРЕКА ПОВЕРХ ИГР: " + ("ВКЛ" if self.cfg["game_card"] else "ВЫКЛ"), 2.0)
 
+    # ------------------------------------------------------------ проверка нагрузки на Проводник
+    def check_shell_load(self):
+        """Плеер по очереди выключает свои части и меряет нагрузку explorer.exe — итог в окне."""
+        if self.__dict__.get("_shell_check") is not None:
+            return
+        import diag_shell
+
+        def status(text):
+            self.flash(text.upper(), 5.0)
+            if hasattr(self, "tray") and self.tray.isVisible():
+                self.tray.setToolTip(text[:120])
+
+        def done(report, _res):
+            self._shell_check = None
+            self.update_tray_tip()
+            box = QMessageBox(self)
+            box.setWindowTitle("Нагрузка на Проводник")
+            box.setText(report)
+            box.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            copy = box.addButton("Копировать", QMessageBox.ButtonRole.ActionRole)
+            box.addButton(QMessageBox.StandardButton.Ok)
+            box.exec()
+            if box.clickedButton() is copy:
+                QApplication.clipboard().setText(report)
+
+        QMessageBox.information(self, "Нагрузка на Проводник",
+                                "Плеер на ~25 секунд по очереди спрячет окно, выключит медиапанель Windows, "
+                                "значок в трее и поставит паузу — и померит, когда Проводнику станет легче.\n\n"
+                                "Ничего не трогай это время. Потом всё вернётся как было.")
+        self._shell_check = diag_shell.ShellLoadCheck(self, status, done)
+        self._shell_check.start()
+
     # ------------------------------------------------------------ повтор A–B
     def ab_cycle(self):
         """A → B → сброс (как на настоящих плеерах)."""
@@ -4617,6 +4649,7 @@ class Mp3Widget(QWidget):
             a.setToolTip("Только для игр в окне на весь экран (без рамки). В полноэкранном режиме Direct3D "
                          "окна поверх игры не видно.\nВ некоторых играх окно поверх может немного снизить FPS.")
 
+        st_m.addAction("🩺  Почему грузится Проводник? (проверка 25 с)", self.check_shell_load)
         self.act_dc = st_m.addAction("🎮  Показывать в Discord (Music → Discord)", self.toggle_discord_link)
         self.act_dc.setCheckable(True)
         self.assoc_menu = st_m.addMenu("🔗  Открывать музыку в MP3 Плеере")
