@@ -2784,8 +2784,8 @@ class Mp3Widget(QWidget):
         except Exception:
             pass
         # плеер не на виду (игра, другое окно) — плашка громкости поверх всего
-        if fullscreen.game_mode(0.25) != "exclusive" and (self._covered() or not self.isVisible()
-                                                          or fullscreen.game_mode(0.25) == "window"):
+        mode = fullscreen.game_mode(0.25)
+        if self._overlay_game_ok() or (not mode and (self._covered() or not self.isVisible())):
             self.vol_badge.show_level(v, muted)
 
     def seek_by(self, ms):
@@ -2821,9 +2821,13 @@ class Mp3Widget(QWidget):
 
     # ------------------------------------------------------------ поверх игры
     def _overlay_game_ok(self):
-        """Игра идёт окном на весь экран — поверх неё можно показать. В «настоящем» полноэкранном
-        Direct3D окно не видно, а попытка показать может свернуть игру — тогда ничего не показываем."""
-        return fullscreen.game_mode(0.25) == "window"      # чаще обычного: Alt+Tab заметить сразу
+        """Сейчас идёт игра и поверх неё можно показать окно.
+        «Окно на весь экран» — всегда. «Полноэкранный DirectX» — тоже (по умолчанию): в Windows 10/11 такие
+        игры почти всегда выводятся через рабочий стол (оптимизация полноэкранного режима), и окно поверх видно;
+        наши окна не берут фокус, поэтому игру не сворачивают. Для старых игр с настоящим монопольным
+        режимом это можно выключить: «Вид → Поверх игр → …и в полноэкранном режиме DirectX»."""
+        mode = fullscreen.game_mode(0.25)                  # чаще обычного: Alt+Tab заметить сразу
+        return mode == "window" or (mode == "exclusive" and self.cfg.get("overlay_exclusive", True))
 
     def game_overlay_tick(self):
         """5 раз в секунду: текущая строка текста песни поверх игры (или спрятать)."""
@@ -2831,6 +2835,13 @@ class Mp3Widget(QWidget):
             return                                       # сейчас видна подпись «вкл / выкл»
         ly = self.lyrics
         in_game = self._overlay_game_ok()
+        now = time.monotonic()
+        if in_game and now - self.__dict__.get("_ov_raise_t", 0.0) > 2.0:
+            # игра на весь экран часто сама «поверх всех» — поднимаем свои окна выше неё (без фокуса)
+            self._ov_raise_t = now
+            for w in (self.game_lyrics, self.game_card, self.vol_badge):
+                if w.isVisible():
+                    w.raise_()
         if not in_game and self.game_card.isVisible():
             self.game_card.cancel(fade=True)            # Alt+Tab из игры — карточка тоже плавно гаснет
         if not (self.cfg.get("game_lyrics", True) and ly and not self.radio and self.is_playing() and in_game):
@@ -2872,6 +2883,12 @@ class Mp3Widget(QWidget):
             self.game_lyrics.notice("Текст песни: " + ("вкл" if on else "выкл") + "  ·  Ctrl+Alt+G")
             self._game_notice_until = time.monotonic() + 1.6
             QTimer.singleShot(1650, self.game_lyrics.clear)
+
+    def toggle_overlay_exclusive(self):
+        self.cfg["overlay_exclusive"] = not self.cfg.get("overlay_exclusive", True)
+        self.act_overlay_excl.setChecked(bool(self.cfg["overlay_exclusive"]))
+        self.save_later()
+        self.flash("ПОВЕРХ ПОЛНОЭКРАННЫХ ИГР: " + ("ДА" if self.cfg["overlay_exclusive"] else "НЕТ"), 2.0)
 
     def set_game_lyrics_opacity(self, v):
         self.cfg["game_lyrics_opacity"] = v
@@ -4666,6 +4683,12 @@ class Mp3Widget(QWidget):
         self.act_game_card = gm.addAction("Карточка трека после дослушанного (P3R)", self.toggle_game_card)
         self.act_game_card.setCheckable(True)
         self.act_game_card.setChecked(bool(self.cfg.get("game_card", True)))
+        self.act_overlay_excl = gm.addAction("…и в полноэкранном режиме DirectX", self.toggle_overlay_exclusive)
+        self.act_overlay_excl.setCheckable(True)
+        self.act_overlay_excl.setChecked(bool(self.cfg.get("overlay_exclusive", True)))
+        self.act_overlay_excl.setToolTip("Обычно окна поверх видны и в «полноэкранном» режиме (Windows выводит игру "
+                                         "через рабочий стол).\nЕсли старая игра от этого сворачивается или мигает — "
+                                         "выключи: окна будут только для игр «в окне без рамки».")
         om = gm.addMenu("Прозрачность текста")
         ogrp = QActionGroup(self)
         self.game_opacity_actions = {}
