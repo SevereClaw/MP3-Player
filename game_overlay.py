@@ -7,7 +7,7 @@
 """
 import time
 
-from PySide6.QtCore import Qt, QTimer, QRectF, QPointF, QPropertyAnimation, QEasingCurve
+from PySide6.QtCore import Qt, QTimer, QRectF, QPointF, QPropertyAnimation, QEasingCurve, Signal
 from PySide6.QtGui import (QPainter, QColor, QFont, QFontMetricsF, QPainterPath, QPolygonF, QPen,
                            QLinearGradient, QGuiApplication, QCursor, QImage)
 from PySide6.QtWidgets import QWidget
@@ -142,9 +142,13 @@ class GameLyrics(_OverlayBase):
     """Строка текста песни внизу экрана поверх игры: текущая — крупно, следующая — бледнее.
     Смена строки — короткий «выезд» скошенной плашки, как подписи в P3R."""
     W, H = 760, 92
+    moved = Signal(float, float)         # центр окна в долях экрана (0..1) — после перетаскивания
+    scaled = Signal(float)               # новый размер (1.0 — обычный) — после Ctrl + колёсико
 
     def __init__(self):
         super().__init__()
+        self.k = 1.0                     # размер (Ctrl + колёсико)
+        self.pos_frac = None             # (x, y) центра в долях экрана, если перетаскивали
         self.setFixedSize(self.W, self.H)
         self.cur = self.nxt = ""
         self.title = ""
@@ -152,10 +156,105 @@ class GameLyrics(_OverlayBase):
         self._changed = 0.0
         self.anim = QTimer(self, interval=16)
         self.anim.timeout.connect(self._frame)
+        # Ctrl зажат — окно ловит мышь: тащить и менять размер. Отпустил — снова насквозь.
+        self.edit = False
+        self._drag = None
+        self.ctrl_poll = QTimer(self, interval=40)
+        self.ctrl_poll.timeout.connect(self._poll_ctrl)
+
+    # ------------------------------------------------------------ место и размер
+    def set_scale(self, k):
+        self.k = max(0.6, min(2.2, round(float(k), 2)))
+        self.setFixedSize(int(self.W * self.k), int(self.H * self.k))
+        self.place()
+        self.update()
 
     def place(self, screen=None):
+        if self._drag is not None:
+            return                       # тащат мышью — не мешаем
         g = (screen or game_screen()).geometry()
-        self.move(g.x() + (g.width() - self.W) // 2, g.y() + g.height() - self.H - int(g.height() * 0.08))
+        w, h = self.width(), self.height()
+        if self.pos_frac:
+            cx, cy = g.x() + g.width() * self.pos_frac[0], g.y() + g.height() * self.pos_frac[1]
+            x = int(min(max(cx - w / 2, g.x()), g.x() + g.width() - w))
+            y = int(min(max(cy - h / 2, g.y()), g.y() + g.height() - h))
+            self.move(x, y)
+        else:
+            self.move(g.x() + (g.width() - w) // 2, g.y() + g.height() - h - int(g.height() * 0.08))
+
+    @staticmethod
+    def _ctrl_down():
+        try:
+            import sys
+            if sys.platform != "win32":
+                return False
+            import ctypes
+            return bool(ctypes.windll.user32.GetAsyncKeyState(0x11) & 0x8000)
+        except Exception:
+            return False
+
+    def _poll_ctrl(self):
+        if not self.isVisible():
+            self.ctrl_poll.stop()
+            self._set_edit(False)
+            return
+        want = self._ctrl_down() or self._drag is not None
+        if want != self.edit:
+            self._set_edit(want)
+
+    def _set_edit(self, on):
+        """Включить / выключить «ловлю мыши» (WS_EX_TRANSPARENT снимается только пока зажат Ctrl)."""
+        if on == self.edit:
+            return
+        self.edit = on
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, not on)
+        try:
+            import sys
+            if sys.platform == "win32":
+                import ctypes
+                u = ctypes.windll.user32
+                hwnd = int(self.winId())
+                u.GetWindowLongW.restype = ctypes.c_long
+                ex = u.GetWindowLongW(hwnd, -20)
+                ex = (ex & ~0x20) if on else (ex | 0x20)          # WS_EX_TRANSPARENT
+                u.SetWindowLongW(hwnd, -20, ex)
+        except Exception:
+            pass
+        if on:
+            self.setCursor(Qt.CursorShape.SizeAllCursor)
+        self.update()
+
+    def mousePressEvent(self, e):
+        if self.edit and e.button() == Qt.MouseButton.LeftButton:
+            self._drag = e.globalPosition().toPoint() - self.pos()
+            e.accept()
+
+    def mouseMoveEvent(self, e):
+        if self._drag is not None:
+            self.move(e.globalPosition().toPoint() - self._drag)
+
+    def mouseReleaseEvent(self, e):
+        if self._drag is not None:
+            self._drag = None
+            g = game_screen().geometry()
+            c = self.frameGeometry().center()
+            self.pos_frac = (min(1.0, max(0.0, (c.x() - g.x()) / max(1, g.width()))),
+                             min(1.0, max(0.0, (c.y() - g.y()) / max(1, g.height()))))
+            self.moved.emit(*self.pos_frac)
+
+    def wheelEvent(self, e):
+        if not self.edit:
+            return
+        d = e.angleDelta().y() or e.angleDelta().x()
+        if d:
+            c = self.frameGeometry().center()
+            self.set_scale(self.k + (0.1 if d > 0 else -0.1))
+            if self.pos_frac is None:                          # размер меняется вокруг центра, не прыгая
+                g = game_screen().geometry()
+                self.pos_frac = ((c.x() - g.x()) / max(1, g.width()), (c.y() - g.y()) / max(1, g.height()))
+                self.place()
+            self.scaled.emit(self.k)
+            e.accept()
 
     def set_lines(self, cur, nxt, title=""):
         cur, nxt = (cur or "").strip(), (nxt or "").strip()
@@ -168,6 +267,8 @@ class GameLyrics(_OverlayBase):
             self.anim.start()
         self.place()
         self.fade_in()
+        if not self.ctrl_poll.isActive():
+            self.ctrl_poll.start()
         self.update()
 
     def notice(self, text):
@@ -179,7 +280,10 @@ class GameLyrics(_OverlayBase):
         return max(0.2, min(1.0, self.opacity))
 
     def clear(self, fade=True):
-        """Спрятать: плавно (по умолчанию) или сразу (выход из программы)."""
+        """Спрятать: плавно (по умолчанию) или сразу (выход из программы).
+        Пока зажат Ctrl (двигают / меняют размер) — плавно не прячем."""
+        if fade and (self.edit or self._drag is not None) and self.isVisible():
+            return
         if fade and self.isVisible():
             self.fade_out()
             return
@@ -205,7 +309,18 @@ class GameLyrics(_OverlayBase):
         p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
         t = min(1.0, (time.monotonic() - self._changed) / 0.35)
         ease = 1 - (1 - t) ** 3
-        W, H = self.width(), self.height()
+        p.scale(self.k, self.k)                  # рисуем в обычном размере, окно увеличено / уменьшено
+        W, H = self.W, self.H
+        if self.edit:                            # зажат Ctrl: рамка и подсказка
+            fr = QColor(CYAN)
+            fr.setAlpha(200)
+            p.setPen(QPen(fr, 1.5, Qt.PenStyle.DashLine))
+            p.setBrush(QColor(6, 19, 49, 70))
+            p.drawRect(QRectF(1, 1, W - 2, H - 2))
+            p.setFont(_font(11, italic=False, weight=QFont.Weight.Bold))
+            p.setPen(ICE)
+            p.drawText(QRectF(8, H - 16, W - 16, 14), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                       f"Ctrl + мышь — двигать  ·  Ctrl + колёсико — размер ({int(round(self.k * 100))} %)")
 
         # подложка-полоса: тёмная скошенная, чтобы текст читался на любом кадре игры
         if self.cur:
