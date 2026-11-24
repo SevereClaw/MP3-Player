@@ -98,25 +98,27 @@ class _OverlayBase(QWidget):
 class GameLyrics(_OverlayBase):
     """Строка текста песни внизу экрана поверх игры: текущая — крупно, следующая — бледнее.
     Смена строки — короткий «выезд» скошенной плашки, как подписи в P3R."""
-    W, H = 1100, 132
+    W, H = 760, 92
 
     def __init__(self):
         super().__init__()
         self.setFixedSize(self.W, self.H)
         self.cur = self.nxt = ""
         self.title = ""
+        self.opacity = 0.7               # общая прозрачность (настройка «Прозрачность текста»)
         self._changed = 0.0
         self.anim = QTimer(self, interval=16)
         self.anim.timeout.connect(self._frame)
 
     def place(self, screen=None):
         g = (screen or game_screen()).geometry()
-        self.move(g.x() + (g.width() - self.W) // 2, g.y() + g.height() - self.H - int(g.height() * 0.11))
+        self.move(g.x() + (g.width() - self.W) // 2, g.y() + g.height() - self.H - int(g.height() * 0.08))
 
     def set_lines(self, cur, nxt, title=""):
         cur, nxt = (cur or "").strip(), (nxt or "").strip()
         if (cur, nxt) == (self.cur, self.nxt) and self.isVisible():
             return
+        self.setWindowOpacity(max(0.2, min(1.0, self.opacity)))
         changed = cur != self.cur
         self.cur, self.nxt, self.title = cur, nxt, title
         if changed:
@@ -125,6 +127,11 @@ class GameLyrics(_OverlayBase):
         self.place()
         self._show_quiet()
         self.update()
+
+    def notice(self, text):
+        """Короткая подпись (например, «текст поверх игры выключен») — видна, даже если сам текст выключен."""
+        self.cur, self.nxt = "", ""
+        self.set_lines(text, "")
 
     def clear(self):
         self.anim.stop()
@@ -147,48 +154,48 @@ class GameLyrics(_OverlayBase):
 
         # подложка-полоса: тёмная скошенная, чтобы текст читался на любом кадре игры
         if self.cur:
-            f = _fit_font(self.cur, W - 160, (38, 34, 30, 27, 24))
+            f = _fit_font(self.cur, W - 120, (26, 23, 21, 19, 17))
             fm = QFontMetricsF(f)
-            text = fm.elidedText(self.cur, Qt.TextElideMode.ElideRight, W - 160)
+            text = fm.elidedText(self.cur, Qt.TextElideMode.ElideRight, W - 120)
             tw = fm.horizontalAdvance(text)
-            bw = tw + 110
-            x0 = (W - bw) / 2 + (1 - ease) * 60
-            band = QRectF(x0, 16, bw, 60)
+            bw = tw + 80
+            x0 = (W - bw) / 2 + (1 - ease) * 40
+            band = QRectF(x0, 10, bw, 42)
             c = QColor(NAVY)
-            c.setAlpha(int(205 * ease))
+            c.setAlpha(int(140 * ease))
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(c)
-            p.drawPolygon(_skew(band, 20))
+            p.drawPolygon(_skew(band, 14))
             acc = QColor(CYAN)
-            acc.setAlpha(int(255 * ease))
+            acc.setAlpha(int(220 * ease))
             p.setBrush(acc)
-            p.drawPolygon(_slant(band.left() - 16, band.top(), 10, band.height(), 20))
-            p.drawPolygon(_skew(QRectF(band.left() + 30, band.bottom() - 4, bw * 0.55, 4), 2))
+            p.drawPolygon(_slant(band.left() - 11, band.top(), 7, band.height(), 14))
+            p.drawPolygon(_skew(QRectF(band.left() + 22, band.bottom() - 3, bw * 0.55, 3), 1.5))
             # сам текст: белый курсив с тонкой голубой тенью
             path = QPainterPath()
-            path.addText(QPointF(x0 + 55, band.top() + 30 + (fm.ascent() - fm.descent()) / 2), f, text)
+            path.addText(QPointF(x0 + 40, band.top() + 21 + (fm.ascent() - fm.descent()) / 2), f, text)
             sh = QColor(CYAN)
             sh.setAlpha(int(110 * ease))
             p.save()
             p.translate(2, 2)
             p.fillPath(path, sh)
             p.restore()
-            p.setPen(QPen(QColor(3, 10, 31, int(230 * ease)), 3))
+            p.setPen(QPen(QColor(3, 10, 31, int(200 * ease)), 2.2))
             p.drawPath(path)
             wc = QColor(WHITE)
             wc.setAlpha(int(255 * ease))
             p.fillPath(path, wc)
         if self.nxt:
-            f2 = _font(22, weight=QFont.Weight.DemiBold)
+            f2 = _font(15, weight=QFont.Weight.DemiBold)
             fm2 = QFontMetricsF(f2)
-            text2 = fm2.elidedText(self.nxt, Qt.TextElideMode.ElideRight, W - 260)
+            text2 = fm2.elidedText(self.nxt, Qt.TextElideMode.ElideRight, W - 200)
             tw2 = fm2.horizontalAdvance(text2)
-            r2 = QRectF((W - tw2 - 60) / 2 + 30, 86, tw2 + 60, 34)
+            r2 = QRectF((W - tw2 - 44) / 2 + 22, 60, tw2 + 44, 24)
             c2 = QColor(NAVY)
-            c2.setAlpha(150)
+            c2.setAlpha(95)
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(c2)
-            p.drawPolygon(_skew(r2, 12))
+            p.drawPolygon(_skew(r2, 8))
             p.setFont(f2)
             p.setPen(ICE)
             p.drawText(r2, Qt.AlignmentFlag.AlignCenter, text2)
