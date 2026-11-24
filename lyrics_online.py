@@ -1,10 +1,14 @@
 # -*- coding: utf-8 -*-
-"""Синхронные тексты песен с lrclib.net (бесплатно, без ключа).
+"""Синхронные тексты песен с lrclib.net и lyricsify.com (бесплатно, без ключа).
 
-Сначала точный запрос (исполнитель + название + альбом + длительность), потом поиск.
+lrclib.net: сначала точный запрос (исполнитель + название + альбом + длительность), потом поиск.
+Не нашлось — lyricsify.com: у него поиск закрыт капчей, поэтому открываем страницу песни прямо
+по адресу /lyrics/исполнитель/название. Сайт под защитой Cloudflare и иногда не пускает
+программы — тогда он просто пропускается.
 Берём только текст с таймкодами: простой текст без времени на экране «караоке»
 не покажешь. Найденное сохраняем обычным .lrc — дальше плеер (и Music → Discord)
 берут его как свой файл, без интернета."""
+import html as htmlmod
 import json
 import os
 import re
@@ -54,7 +58,91 @@ def clean_title(title):
     return re.sub(r"\s{2,}", " ", t).strip()
 
 
+# ------------------------------------------------------------------ lyricsify.com
+LSY = "https://www.lyricsify.com/lyrics/{}/{}"
+LSY_HDR = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+                  "Chrome/131.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9,ru;q=0.8",
+    "Upgrade-Insecure-Requests": "1",
+}
+
+
+def lyricsify_slug(s):
+    """«Don't Stop (feat. X)» → «dont-stop-feat-x»: как адреса страниц lyricsify.com."""
+    s = (s or "").strip().lower()
+    s = re.sub(r"[\'!?\"/.&,()\[\]:;*#@+]", "", s)
+    s = re.sub(r"\s+", "-", s)
+    return re.sub(r"-{2,}", "-", s).strip("-")
+
+
+def _lyricsify_page(url, timeout=10):
+    """HTML страницы или None (нет такой страницы / не пустил Cloudflare)."""
+    req = urllib.request.Request(url, headers=LSY_HDR)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError:
+        return None                                 # 404 — нет страницы; 403/503 — Cloudflare
+
+
+def lyricsify_extract(page):
+    """Текст с таймкодами из страницы песни или ''."""
+    m = re.search(r'details">(.*?)</div', page or "", re.S)
+    if not m:
+        return ""
+    body = re.sub(r"<br\s*/?>", "\n", m.group(1), flags=re.I)
+    body = htmlmod.unescape(re.sub(r"<[^<]+?>", "", body))
+    lines = [ln.strip() for ln in body.replace("\r", "").split("\n")]
+    text = "\n".join(ln for ln in lines if ln)
+    return text if len(_TS.findall(text)) >= 3 else ""
+
+
+def fetch_lyricsify(artist, title):
+    """→ текст LRC или None. Пробует пару вариантов адреса (с «feat.» и без, очищенное название)."""
+    artist, title = (artist or "").strip(), (title or "").strip()
+    if not artist or not title:
+        return None
+    artists = dict.fromkeys([artist, re.split(r"\s*,\s*|\s+(?:feat\.?|ft\.?|featuring|&|x)\s+", artist, flags=re.I)[0]])
+    titles = dict.fromkeys([title, clean_title(title), re.sub(r"\s*[\(\[].*?[\)\]]", "", clean_title(title))])
+    tried = set()
+    for a in artists:
+        for t in titles:
+            url = LSY.format(lyricsify_slug(a), lyricsify_slug(t))
+            if url in tried or not lyricsify_slug(a) or not lyricsify_slug(t):
+                continue
+            tried.add(url)
+            text = lyricsify_extract(_lyricsify_page(url))
+            if text:
+                return text
+            if len(tried) >= 4:                     # не долбим сайт десятком запросов
+                return None
+    return None
+
+
 def fetch(artist, title, album="", duration_s=0):
+    """→ (текст LRC или None, пояснение). Сначала lrclib.net, потом lyricsify.com.
+    Оба сайта недоступны (нет сети) — исключение от lrclib, как раньше."""
+    err = None
+    try:
+        text, why = fetch_lrclib(artist, title, album, duration_s)
+    except Exception as e:
+        text, why, err = None, "", e
+    if text or why == "инструментал — без слов":
+        return text, why
+    try:
+        lsy = fetch_lyricsify(artist, title)
+    except Exception:
+        lsy = None
+    if lsy:
+        return lsy, "lyricsify.com"
+    if err is not None:
+        raise err
+    return None, why
+
+
+def fetch_lrclib(artist, title, album="", duration_s=0):
     """→ (текст LRC или None, пояснение)."""
     title = (title or "").strip()
     artist = (artist or "").strip()
@@ -104,14 +192,14 @@ def fetch(artist, title, album="", duration_s=0):
     return None, ("есть только текст без таймкодов" if plain else "текст не найден")
 
 
-def save(lrc_text, track_path, artist, title, album="", fallback_dir=None):
+def save(lrc_text, track_path, artist, title, album="", fallback_dir=None, source="lrclib.net"):
     """Сохранить рядом с треком («Трек.lrc»); если в папку писать нельзя — в fallback_dir.
     → путь к файлу."""
     head = []
     for tag, val in (("ar", artist), ("ti", title), ("al", album)):
         if val:
             head.append(f"[{tag}:{val}]")
-    head.append("[re:lrclib.net]")
+    head.append(f"[re:{source}]")
     body = "\n".join(head) + "\n" + lrc_text.strip() + "\n"
     stem = os.path.splitext(os.path.basename(track_path))[0]
     targets = [os.path.join(os.path.dirname(track_path), stem + ".lrc")]

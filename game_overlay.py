@@ -7,7 +7,7 @@
 """
 import time
 
-from PySide6.QtCore import Qt, QTimer, QRectF, QPointF
+from PySide6.QtCore import Qt, QTimer, QRectF, QPointF, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import (QPainter, QColor, QFont, QFontMetricsF, QPainterPath, QPolygonF, QPen,
                            QLinearGradient, QGuiApplication, QCursor, QImage)
 from PySide6.QtWidgets import QWidget
@@ -83,6 +83,49 @@ class _OverlayBase(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self._styled = False
+        self._fading_out = False
+        self.fade = QPropertyAnimation(self, b"windowOpacity", self)
+        self.fade.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.fade.finished.connect(self._fade_done)
+
+    def target_opacity(self):
+        return 1.0
+
+    def fade_in(self, ms=260):
+        """Показать с плавным проявлением (или вернуть, если как раз гасло)."""
+        appearing = not self.isVisible() or self._fading_out
+        self._fading_out = False
+        if not self.isVisible():
+            self.setWindowOpacity(0.0)
+        self._show_quiet()
+        if appearing:
+            self.fade.stop()
+            self.fade.setDuration(ms)
+            self.fade.setStartValue(self.windowOpacity())
+            self.fade.setEndValue(self.target_opacity())
+            self.fade.start()
+        elif self.fade.state() != QPropertyAnimation.State.Running:
+            self.setWindowOpacity(self.target_opacity())
+
+    def fade_out(self, ms=380):
+        """Плавно погасить и спрятать (Alt+Tab из игры, конец строки)."""
+        if not self.isVisible() or self._fading_out:
+            return
+        self._fading_out = True
+        self.fade.stop()
+        self.fade.setDuration(ms)
+        self.fade.setStartValue(self.windowOpacity())
+        self.fade.setEndValue(0.0)
+        self.fade.start()
+
+    def _fade_done(self):
+        if self._fading_out:
+            self._fading_out = False
+            self.hide()
+            self._after_hide()
+
+    def _after_hide(self):
+        pass
 
     def _show_quiet(self):
         if not self._styled:
@@ -116,16 +159,15 @@ class GameLyrics(_OverlayBase):
 
     def set_lines(self, cur, nxt, title=""):
         cur, nxt = (cur or "").strip(), (nxt or "").strip()
-        if (cur, nxt) == (self.cur, self.nxt) and self.isVisible():
+        if (cur, nxt) == (self.cur, self.nxt) and self.isVisible() and not self._fading_out:
             return
-        self.setWindowOpacity(max(0.2, min(1.0, self.opacity)))
         changed = cur != self.cur
         self.cur, self.nxt, self.title = cur, nxt, title
         if changed:
             self._changed = time.monotonic()
             self.anim.start()
         self.place()
-        self._show_quiet()
+        self.fade_in()
         self.update()
 
     def notice(self, text):
@@ -133,10 +175,23 @@ class GameLyrics(_OverlayBase):
         self.cur, self.nxt = "", ""
         self.set_lines(text, "")
 
-    def clear(self):
+    def target_opacity(self):
+        return max(0.2, min(1.0, self.opacity))
+
+    def clear(self, fade=True):
+        """Спрятать: плавно (по умолчанию) или сразу (выход из программы)."""
+        if fade and self.isVisible():
+            self.fade_out()
+            return
+        self.fade.stop()
+        self._fading_out = False
         self.anim.stop()
         if self.isVisible():
             self.hide()
+        self.cur = self.nxt = ""
+
+    def _after_hide(self):
+        self.anim.stop()
         self.cur = self.nxt = ""
 
     def _frame(self):
@@ -225,15 +280,26 @@ class GameTrackCard(_OverlayBase):
         g = game_screen().geometry()
         self.move(g.x() + int(g.width() * 0.035), g.y() + int(g.height() * 0.08))
         self._t0 = time.monotonic()
+        self.fade.stop()
+        self._fading_out = False
         self.setWindowOpacity(1.0)
         self._show_quiet()
         self.anim.start()
         self.update()
 
-    def cancel(self):
+    def cancel(self, fade=False):
+        """Убрать карточку: сразу или плавно (Alt+Tab из игры)."""
+        if fade and self.isVisible():
+            self.fade_out(300)
+            return
+        self.fade.stop()
+        self._fading_out = False
         self.anim.stop()
         if self.isVisible():
             self.hide()
+
+    def _after_hide(self):
+        self.anim.stop()
 
     def _phase(self):
         t = time.monotonic() - self._t0
@@ -252,7 +318,7 @@ class GameTrackCard(_OverlayBase):
             return
         # окно рисуется только пока что-то движется: в «hold» хватает редких кадров
         self.anim.setInterval(16 if ph != "hold" else 120)
-        if ph == "out":
+        if ph == "out" and not self._fading_out:
             self.setWindowOpacity(1.0 - k)
         self.update()
 

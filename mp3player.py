@@ -2793,15 +2793,17 @@ class Mp3Widget(QWidget):
     def _overlay_game_ok(self):
         """Игра идёт окном на весь экран — поверх неё можно показать. В «настоящем» полноэкранном
         Direct3D окно не видно, а попытка показать может свернуть игру — тогда ничего не показываем."""
-        return fullscreen.game_mode() == "window"
+        return fullscreen.game_mode(0.25) == "window"      # чаще обычного: Alt+Tab заметить сразу
 
     def game_overlay_tick(self):
         """5 раз в секунду: текущая строка текста песни поверх игры (или спрятать)."""
         if time.monotonic() < self.__dict__.get("_game_notice_until", 0.0):
             return                                       # сейчас видна подпись «вкл / выкл»
         ly = self.lyrics
-        if not (self.cfg.get("game_lyrics", True) and ly and not self.radio and self.is_playing()
-                and self._overlay_game_ok()):
+        in_game = self._overlay_game_ok()
+        if not in_game and self.game_card.isVisible():
+            self.game_card.cancel(fade=True)            # Alt+Tab из игры — карточка тоже плавно гаснет
+        if not (self.cfg.get("game_lyrics", True) and ly and not self.radio and self.is_playing() and in_game):
             self.game_lyrics.clear()
             return
         pos = self.player.position() + 150               # строка появляется чуть раньше, как в караоке
@@ -2834,7 +2836,7 @@ class Mp3Widget(QWidget):
         self.act_game_lyrics.setChecked(on)
         self.save_later()
         self.flash("ТЕКСТ ПОВЕРХ ИГР: " + ("ВКЛ" if on else "ВЫКЛ"), 2.0)
-        self.game_lyrics.clear()
+        self.game_lyrics.clear(fade=False)
         if self._overlay_game_ok():                      # в игре — короткая подпись прямо поверх неё
             self.game_lyrics.opacity = float(self.cfg.get("game_lyrics_opacity", 0.7))
             self.game_lyrics.notice("Текст песни: " + ("вкл" if on else "выкл") + "  ·  Ctrl+Alt+G")
@@ -5383,10 +5385,11 @@ class Mp3Widget(QWidget):
                 if not text:
                     emit(path, "", why, manual)
                     return
-                saved = lyrics_online.save(text, path, artist, title, album, fallback)
+                src = "lyricsify.com" if "lyricsify" in why else "lrclib.net"
+                saved = lyrics_online.save(text, path, artist, title, album, fallback, source=src)
                 emit(path, saved, why, manual)
             except Exception as e:
-                emit(path, "", f"нет связи с lrclib.net ({type(e).__name__})", manual)
+                emit(path, "", f"нет связи с lrclib.net и lyricsify.com ({type(e).__name__})", manual)
         threading.Thread(target=work, daemon=True).start()
 
     def on_lyrics_online(self, path, lrc, why, manual):
@@ -5573,7 +5576,7 @@ class Mp3Widget(QWidget):
         self.playlist_panel.hide()
         self.toast.hide()
         self.game_timer.stop()
-        self.game_lyrics.clear()
+        self.game_lyrics.clear(fade=False)
         self.game_card.cancel()
         self.tray.hide()
         QApplication.quit()
