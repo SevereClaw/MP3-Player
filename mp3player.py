@@ -5450,11 +5450,12 @@ class Mp3Widget(QWidget):
                 if not text:
                     emit(path, "", why, manual)
                     return
-                src = "lyricsify.com" if "lyricsify" in why else "lrclib.net"
+                src = ("lyricsify.com" if "lyricsify" in why else "music.163.com" if "NetEase" in why
+                       else "lrclib.net")
                 saved = lyrics_online.save(text, path, artist, title, album, fallback, source=src)
                 emit(path, saved, why, manual)
             except Exception as e:
-                emit(path, "", f"нет связи с lrclib.net и lyricsify.com ({type(e).__name__})", manual)
+                emit(path, "", f"нет связи с сайтами текстов ({type(e).__name__})", manual)
         threading.Thread(target=work, daemon=True).start()
 
     def on_lyrics_online(self, path, lrc, why, manual):

@@ -93,7 +93,7 @@ jobs:
           PYTHONIOENCODING: utf-8
         run: python tests/test_mywave.py
 
-      - name: Lyricsify pages are parsed (offline)
+      - name: Lyrics sources NetEase and lyricsify are parsed (offline)
         env:
           PYTHONIOENCODING: utf-8
         run: python tests/test_lyricsify.py

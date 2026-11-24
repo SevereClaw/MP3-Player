@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Синхронные тексты песен с lrclib.net и lyricsify.com (бесплатно, без ключа).
+"""Синхронные тексты песен с lrclib.net, NetEase Cloud Music и lyricsify.com (бесплатно, без ключа).
 
 lrclib.net: сначала точный запрос (исполнитель + название + альбом + длительность), потом поиск.
-Не нашлось — lyricsify.com: у него поиск закрыт капчей, поэтому открываем страницу песни прямо
+Не нашлось — NetEase (music.163.com): огромная база, особенно японская музыка, аниме и игры; поиск
+по названию, а чужую песню с тем же названием отсекает длительность. Не нашлось и там — lyricsify.com: у него поиск закрыт капчей, поэтому открываем страницу песни прямо
 по адресу /lyrics/исполнитель/название. Сайт под защитой Cloudflare и иногда не пускает
 программы — тогда он просто пропускается.
 Берём только текст с таймкодами: простой текст без времени на экране «караоке»
@@ -56,6 +57,98 @@ def clean_title(title):
     t = re.sub(r"[\(\[][^\)\]]*(official|video|audio|lyric|hd|hq|remaster|клип|текст)[^\)\]]*[\)\]]",
                " ", t, flags=re.I)
     return re.sub(r"\s{2,}", " ", t).strip()
+
+
+# ------------------------------------------------------------------ NetEase Cloud Music
+NE = "https://music.163.com/api"
+NE_HDR = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+                  "Chrome/131.0.0.0 Safari/537.36",
+    "Referer": "https://music.163.com/",
+    "Accept": "application/json, text/plain, */*",
+}
+# строки-титры в начале текстов NetEase: «作词 : …», «作曲 : …», «Lyrics by …» — это не слова песни
+_NE_CREDIT = re.compile(r"^\s*(作词|作曲|编曲|制作人|制作|混音|母带|和声|吉他|贝斯|鼓|弦乐|录音|监制|出品|发行|词|曲|编|"
+                        r"lyrics?\s*by|composed\s*by|arranged\s*by|written\s*by|produced\s*by|vocals?)\s*[:：]", re.I)
+
+
+def _ne_get(path, params, timeout=10):
+    url = f"{NE}/{path}?" + urllib.parse.urlencode(params)
+    req = urllib.request.Request(url, headers=NE_HDR)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8", "replace"))
+
+
+def netease_clean(lrc):
+    """Текст NetEase → .lrc без строк-титров; «纯音乐» (инструментал) и текст без таймкодов → ''."""
+    if not lrc or "纯音乐" in lrc:
+        return ""
+    out = []
+    for line in lrc.replace("\r", "").split("\n"):
+        body = _TS.sub("", line).strip()
+        if _TS.search(line) and _NE_CREDIT.search(body):
+            continue
+        out.append(line.rstrip())
+    text = "\n".join(ln for ln in out if ln.strip())
+    return text if len(_TS.findall(text)) >= 3 else ""
+
+
+def netease_pick(songs, artist, title, duration_s=0):
+    """Лучшая песня из ответа поиска или None. Длительность известна — расхождение больше 8 с отсекает
+    (другая версия: тайминги не совпадут); без исполнителя без длительности не рискуем."""
+    want_t, want_a = _norm(clean_title(title)), _norm(artist)
+    best, best_score = None, -1
+    for idx, sg in enumerate(songs or []):
+        name = _norm(sg.get("name"))
+        who = " ".join(_norm(a.get("name")) for a in (sg.get("artists") or sg.get("ar") or []))
+        dur = float(sg.get("duration") or sg.get("dt") or 0) / 1000.0
+        score = 0
+        t_ok = bool(want_t and name and (want_t in name or name in want_t))
+        if t_ok:
+            score += 3 if want_t == name else 1
+        a_ok = bool(want_a and who and (want_a in who or any(w and w in want_a for w in who.split())))
+        if a_ok:
+            score += 2
+        if duration_s and dur:
+            diff = abs(dur - duration_s)
+            if diff > 8:
+                continue
+            # название по-японски, исполнитель другой записью: верим только почти точной длительности
+            # и только среди первых результатов поиска
+            if not t_ok and not a_ok and (diff > 1.5 or idx > 2):
+                continue
+            score += 3 if diff <= 2 else 2
+        elif not want_a:
+            continue
+        if score < 3:                               # ни имени, ни длительности толком не совпало
+            continue
+        if score > best_score:
+            best, best_score = sg, score
+    return best
+
+
+def fetch_netease(artist, title, duration_s=0):
+    """→ (текст LRC или None, почему не нашлось)."""
+    title = (title or "").strip()
+    if not title:
+        return None, "нет названия"
+    queries = list(dict.fromkeys(q for q in (f"{artist} {title}".strip(), f"{artist} {clean_title(title)}".strip(),
+                                             clean_title(title)) if q))
+    found_song = False
+    for q in queries[:3]:
+        res = _ne_get("search/get", {"s": q, "type": 1, "limit": 15, "offset": 0}) or {}
+        songs = (res.get("result") or {}).get("songs") or []
+        sg = netease_pick(songs, artist, title, duration_s)
+        if not sg:
+            continue
+        found_song = True
+        ly = _ne_get("song/lyric", {"id": sg.get("id"), "lv": 1, "kv": 1, "tv": -1}) or {}
+        if ly.get("nolyric") or ly.get("uncollected"):
+            continue
+        text = netease_clean((ly.get("lrc") or {}).get("lyric") or "")
+        if text:
+            return text, ""
+    return None, ("у песни нет текста с таймкодами" if found_song else "подходящей песни нет")
 
 
 # ------------------------------------------------------------------ lyricsify.com
@@ -141,6 +234,12 @@ def fetch(artist, title, album="", duration_s=0):
     if text or why == "инструментал — без слов":
         return text, why
     try:
+        ne, nwhy = fetch_netease(artist, title, duration_s)
+    except Exception as e:
+        ne, nwhy = None, f"нет связи ({type(e).__name__})"
+    if ne:
+        return ne, "NetEase (music.163.com)"
+    try:
         lsy, lwhy = fetch_lyricsify(artist, title)
     except Exception as e:
         lsy, lwhy = None, f"нет связи ({type(e).__name__})"
@@ -148,7 +247,7 @@ def fetch(artist, title, album="", duration_s=0):
         return lsy, "lyricsify.com"
     if err is not None:
         raise err
-    return None, f"lrclib: {why or 'не найден'} · lyricsify: {lwhy}"
+    return None, f"lrclib: {why or 'не найден'} · NetEase: {nwhy} · lyricsify: {lwhy}"
 
 
 def fetch_lrclib(artist, title, album="", duration_s=0):

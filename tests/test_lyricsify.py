@@ -29,8 +29,26 @@ check("нет блока — пусто", L.lyricsify_extract("<html>Just a mome
 _real = L.fetch_lyricsify
 check("без исполнителя — понятная причина", "исполнитель" in _real("", "Song")[1])
 
+# ---------- NetEase: выбор песни и чистка текста
+songs = [
+    {"id": 1, "name": "Other Song", "artists": [{"name": "Someone"}], "duration": 200000},
+    {"id": 2, "name": "未来は僕らの手の中", "artists": [{"name": "結束バンド"}], "duration": 214000},
+    {"id": 3, "name": "Mirai wa Bokura no Te no Naka", "artists": [{"name": "Kessoku Band"}], "duration": 300000},
+]
+sg = L.netease_pick(songs, "", "Mirai wa Bokura no Te no Naka", 213.5)
+check("NetEase: японское название, длительность совпала", sg and sg["id"] == 2, sg)
+sg = L.netease_pick(songs, "Kessoku Band", "Mirai wa Bokura no Te no Naka", 0)
+check("NetEase: без длительности — по названию и исполнителю", sg and sg["id"] == 3, sg)
+sg = L.netease_pick(songs, "", "Совсем другая", 250)
+check("NetEase: ничего похожего — ничего", sg is None, sg)
+raw = "[00:00.00] 作词 : 樋口愛\n[00:01.00] 作曲 : 音羽-otoha-\n[00:12.30]真っ暗闇\n[00:15.00]line two\n[00:18.00]line three"
+clean = L.netease_clean(raw)
+check("NetEase: без строк-титров", "作词" not in clean and clean.startswith("[00:12.30]"), repr(clean))
+check("NetEase: инструментал — пусто", L.netease_clean("[00:00.00]纯音乐，请欣赏") == "")
+
 # lrclib ничего не дал, lyricsify нашёл → текст и пометка источника
 L.fetch_lrclib = lambda *a, **k: (None, "текст не найден")
+L.fetch_netease = lambda *a, **k: (None, "подходящей песни нет")
 L.fetch_lyricsify = lambda a, t: ("[00:01.00]a\n[00:02.00]b\n[00:03.00]c", "")
 t, why = L.fetch("A", "B")
 check("запасной источник", t and why == "lyricsify.com", why)
@@ -42,8 +60,12 @@ def offline(*a, **k):
 
 L.fetch_lyricsify = lambda a, t: (None, "Cloudflare не пустил программу (403)")
 t, why = L.fetch("A", "B")
-check("причина по каждому сайту", t is None and "lrclib" in why and "Cloudflare" in why, why)
+check("причина по каждому сайту", t is None and "lrclib" in why and "NetEase" in why and "Cloudflare" in why, why)
+L.fetch_netease = lambda *a, **k: ("[00:01.00]a\n[00:02.00]b\n[00:03.00]c", "")
+t, why = L.fetch("A", "B")
+check("NetEase раньше lyricsify", t and "NetEase" in why, why)
 L.fetch_lrclib = offline
+L.fetch_netease = offline
 L.fetch_lyricsify = lambda a, t: (None, "нет связи")
 try:
     L.fetch("A", "B")
