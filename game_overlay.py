@@ -77,8 +77,11 @@ def _no_activate(w: QWidget):
 
 
 class _OverlayBase(QWidget):
+    CLICK_THROUGH_QT = True      # «насквозь для мыши» силами Qt (у текста — только через Windows, см. GameLyrics)
+
     def __init__(self):
-        super().__init__(None, _FLAGS)
+        flags = _FLAGS if self.CLICK_THROUGH_QT else (_FLAGS & ~Qt.WindowType.WindowTransparentForInput)
+        super().__init__(None, flags)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
@@ -142,6 +145,10 @@ class GameLyrics(_OverlayBase):
     """Строка текста песни внизу экрана поверх игры: текущая — крупно, следующая — бледнее.
     Смена строки — короткий «выезд» скошенной плашки, как подписи в P3R."""
     W, H = 760, 92
+    # Qt-флаг «насквозь для мыши» Qt держит сам (на каждый клик отвечает Windows «здесь окна нет»), и снять
+    # его на время Ctrl нельзя без пересоздания окна. Поэтому у текста насквозь только через стиль окна
+    # Windows (WS_EX_TRANSPARENT), а его уже можно снимать и ставить обратно.
+    CLICK_THROUGH_QT = False
     moved = Signal(float, float)         # центр окна в долях экрана (0..1) — после перетаскивания
     scaled = Signal(float)               # новый размер (1.0 — обычный) — после Ctrl + колёсико
 
@@ -319,7 +326,7 @@ class GameLyrics(_OverlayBase):
             p.drawRect(QRectF(1, 1, W - 2, H - 2))
             p.setFont(_font(11, italic=False, weight=QFont.Weight.Bold))
             p.setPen(ICE)
-            p.drawText(QRectF(8, H - 16, W - 16, 14), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+            p.drawText(QRectF(8, -1, W - 16, 12), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                        f"Ctrl + мышь — двигать  ·  Ctrl + колёсико — размер ({int(round(self.k * 100))} %)")
 
         # подложка-полоса: тёмная скошенная, чтобы текст читался на любом кадре игры
