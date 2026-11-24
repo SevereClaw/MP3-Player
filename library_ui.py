@@ -1519,7 +1519,7 @@ class NowPlaying(QWidget):
             self.scroll = None
             self.win.toast("🌐 ТЕКСТ НАЙДЕН")
         else:
-            self.win.toast(("🌐 " + (why or "текст не найден")).upper()[:60])
+            self.win.toast(("🌐 " + (why or "текст не найден")).upper()[:140])
         self.update()
 
     def set_picture(self, path, img):
@@ -3945,7 +3945,7 @@ class LibraryWindow(QWidget):
         self._toast.move((self.width() - self._toast.width()) // 2 + 120, self.height() - 92 - self._toast.height() - 16)
         self._toast.show()
         self._toast.raise_()
-        self._toast_timer.start()
+        self._toast_timer.start(max(1800, min(7000, 55 * len(text))))   # длинное пояснение — дольше
 
     def open_album(self, al):
         self._detail_obj = ("album", al)

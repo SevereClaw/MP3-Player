@@ -5465,8 +5465,9 @@ class Mp3Widget(QWidget):
                 misses[pkey(path)] = time.time()
                 while len(misses) > 2000:
                     misses.pop(next(iter(misses)))
+            print("текст из сети:", self.title, "—", why)     # в журнал: почему не нашлось
             if manual:
-                self.flash(("🌐 " + why).upper(), 3.0)
+                self.flash(("🌐 " + why).upper(), 5.0)
             self.save_later()
             return
         misses.pop(pkey(path), None)

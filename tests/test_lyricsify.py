@@ -26,9 +26,12 @@ check("текст со страницы", text == "[ar:A]\n[00:01.00]Hello & hi\
 check("без таймкодов — не берём", L.lyricsify_extract('<div class="details">just plain text</div>') == "")
 check("нет блока — пусто", L.lyricsify_extract("<html>Just a moment...</html>") == "")
 
+_real = L.fetch_lyricsify
+check("без исполнителя — понятная причина", "исполнитель" in _real("", "Song")[1])
+
 # lrclib ничего не дал, lyricsify нашёл → текст и пометка источника
 L.fetch_lrclib = lambda *a, **k: (None, "текст не найден")
-L.fetch_lyricsify = lambda a, t: "[00:01.00]a\n[00:02.00]b\n[00:03.00]c"
+L.fetch_lyricsify = lambda a, t: ("[00:01.00]a\n[00:02.00]b\n[00:03.00]c", "")
 t, why = L.fetch("A", "B")
 check("запасной источник", t and why == "lyricsify.com", why)
 
@@ -37,8 +40,11 @@ def offline(*a, **k):
     raise OSError("нет сети")
 
 
+L.fetch_lyricsify = lambda a, t: (None, "Cloudflare не пустил программу (403)")
+t, why = L.fetch("A", "B")
+check("причина по каждому сайту", t is None and "lrclib" in why and "Cloudflare" in why, why)
 L.fetch_lrclib = offline
-L.fetch_lyricsify = lambda a, t: None
+L.fetch_lyricsify = lambda a, t: (None, "нет связи")
 try:
     L.fetch("A", "B")
     check("нет сети — ошибка как раньше", False)

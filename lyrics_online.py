@@ -78,13 +78,13 @@ def lyricsify_slug(s):
 
 
 def _lyricsify_page(url, timeout=10):
-    """HTML страницы или None (нет такой страницы / не пустил Cloudflare)."""
+    """→ (HTML или None, код ответа). 404 — нет страницы; 403/503 — не пустил Cloudflare."""
     req = urllib.request.Request(url, headers=LSY_HDR)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.read().decode("utf-8", "replace")
-    except urllib.error.HTTPError:
-        return None                                 # 404 — нет страницы; 403/503 — Cloudflare
+            return r.read().decode("utf-8", "replace"), r.status
+    except urllib.error.HTTPError as e:
+        return None, e.code
 
 
 def lyricsify_extract(page):
@@ -100,25 +100,34 @@ def lyricsify_extract(page):
 
 
 def fetch_lyricsify(artist, title):
-    """→ текст LRC или None. Пробует пару вариантов адреса (с «feat.» и без, очищенное название)."""
+    """→ (текст LRC или None, почему не нашлось). Пробует пару вариантов адреса
+    (с «feat.» и без, очищенное название). Поиска у сайта нет (капча), поэтому без исполнителя никак."""
     artist, title = (artist or "").strip(), (title or "").strip()
-    if not artist or not title:
-        return None
+    if not title:
+        return None, "нет названия"
+    if not artist or artist.lower() in ("неизвестный исполнитель", "unknown artist", "unknown"):
+        return None, "у трека не указан исполнитель — без него страницу не найти"
     artists = dict.fromkeys([artist, re.split(r"\s*,\s*|\s+(?:feat\.?|ft\.?|featuring|&|x)\s+", artist, flags=re.I)[0]])
     titles = dict.fromkeys([title, clean_title(title), re.sub(r"\s*[\(\[].*?[\)\]]", "", clean_title(title))])
-    tried = set()
+    tried, codes = [], []
     for a in artists:
         for t in titles:
             url = LSY.format(lyricsify_slug(a), lyricsify_slug(t))
             if url in tried or not lyricsify_slug(a) or not lyricsify_slug(t):
                 continue
-            tried.add(url)
-            text = lyricsify_extract(_lyricsify_page(url))
+            tried.append(url)
+            page, code = _lyricsify_page(url)
+            codes.append(code)
+            if code in (403, 429, 503) or (page and ("Just a moment" in page or "challenge-platform" in page)):
+                return None, f"Cloudflare не пустил программу ({code})"
+            text = lyricsify_extract(page)
             if text:
-                return text
+                return text, ""
             if len(tried) >= 4:                     # не долбим сайт десятком запросов
-                return None
-    return None
+                break
+    if codes and all(c == 404 for c in codes):
+        return None, "страницы песни нет (" + tried[0].split("/lyrics/", 1)[1] + ")"
+    return None, "на странице нет текста с таймкодами"
 
 
 def fetch(artist, title, album="", duration_s=0):
@@ -132,14 +141,14 @@ def fetch(artist, title, album="", duration_s=0):
     if text or why == "инструментал — без слов":
         return text, why
     try:
-        lsy = fetch_lyricsify(artist, title)
-    except Exception:
-        lsy = None
+        lsy, lwhy = fetch_lyricsify(artist, title)
+    except Exception as e:
+        lsy, lwhy = None, f"нет связи ({type(e).__name__})"
     if lsy:
         return lsy, "lyricsify.com"
     if err is not None:
         raise err
-    return None, why
+    return None, f"lrclib: {why or 'не найден'} · lyricsify: {lwhy}"
 
 
 def fetch_lrclib(artist, title, album="", duration_s=0):
