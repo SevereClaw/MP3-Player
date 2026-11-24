@@ -151,6 +151,7 @@ class GameLyrics(_OverlayBase):
     CLICK_THROUGH_QT = False
     moved = Signal(float, float)         # центр окна в долях экрана (0..1) — после перетаскивания
     scaled = Signal(float)               # новый размер (1.0 — обычный) — после Ctrl + колёсико
+    lock_toggled = Signal(bool)          # Ctrl+Alt: закрепили / открепили
 
     def __init__(self):
         super().__init__()
@@ -166,6 +167,8 @@ class GameLyrics(_OverlayBase):
         # Ctrl зажат — окно ловит мышь: тащить и менять размер. Отпустил — снова насквозь.
         self.edit = False
         self._drag = None
+        self.locked = False              # Ctrl+Alt: закрепить — Ctrl больше не включает перетаскивание
+        self._combo = None               # (зажаты Ctrl+Alt, нажималась ли ещё какая-то клавиша)
         self.ctrl_poll = QTimer(self, interval=40)
         self.ctrl_poll.timeout.connect(self._poll_ctrl)
 
@@ -190,22 +193,41 @@ class GameLyrics(_OverlayBase):
             self.move(g.x() + (g.width() - w) // 2, g.y() + g.height() - h - int(g.height() * 0.08))
 
     @staticmethod
-    def _ctrl_down():
+    def _key(vk):
         try:
             import sys
             if sys.platform != "win32":
                 return False
             import ctypes
-            return bool(ctypes.windll.user32.GetAsyncKeyState(0x11) & 0x8000)
+            return bool(ctypes.windll.user32.GetAsyncKeyState(vk) & 0x8000)
         except Exception:
             return False
 
+    @classmethod
+    def _ctrl_down(cls):
+        return cls._key(0x11)
+
+    # клавиши, которые «портят» чистое Ctrl+Alt: буквы, цифры, стрелки, F-клавиши, медиа, пробел и т. п.
+    _OTHER_KEYS = tuple(range(0x08, 0x10)) + tuple(range(0x13, 0x5B)) + tuple(range(0x60, 0x88)) + \
+        tuple(range(0xA6, 0xB8)) + tuple(range(0xBA, 0xE5))
+
     def _poll_ctrl(self):
-        if not self.isVisible():
-            self.ctrl_poll.stop()
-            self._set_edit(False)
-            return
-        want = self._ctrl_down() or self._drag is not None
+        """Раз в 40 мс, пока идёт игра: Ctrl — режим перетаскивания (если не закреплено),
+        чистое Ctrl+Alt (нажал и отпустил без других клавиш) — закрепить / открепить."""
+        ctrl, alt = self._ctrl_down(), self._key(0x12)
+        if ctrl and alt:
+            other = any(self._key(vk) for vk in self._OTHER_KEYS if vk not in (0x10, 0x11, 0x12))
+            if self._combo is None:
+                self._combo = other
+            elif other:
+                self._combo = True
+        elif self._combo is not None:
+            clean = not self._combo
+            self._combo = None
+            if clean:
+                self.locked = not self.locked
+                self.lock_toggled.emit(self.locked)
+        want = self.isVisible() and not self.locked and ((ctrl and not alt) or self._drag is not None)
         if want != self.edit:
             self._set_edit(want)
 
@@ -274,8 +296,6 @@ class GameLyrics(_OverlayBase):
             self.anim.start()
         self.place()
         self.fade_in()
-        if not self.ctrl_poll.isActive():
-            self.ctrl_poll.start()
         self.update()
 
     def notice(self, text):

@@ -847,6 +847,8 @@ class Mp3Widget(QWidget):
         self.game_lyrics.moved.connect(lambda fx, fy: (self.cfg.__setitem__("game_lyrics_pos", [round(fx, 4), round(fy, 4)]),
                                                        self.save_later()))
         self.game_lyrics.scaled.connect(lambda k: (self.cfg.__setitem__("game_lyrics_scale", k), self.save_later()))
+        self.game_lyrics.locked = bool(self.cfg.get("game_lyrics_locked", False))
+        self.game_lyrics.lock_toggled.connect(self.on_game_lyrics_lock)
         self.game_card = GameTrackCard()
         self.vol_badge = VolumeBadge()
         self.game_timer = QTimer(self, interval=200)
@@ -2851,6 +2853,14 @@ class Mp3Widget(QWidget):
                     w.raise_()
         if not in_game and self.game_card.isVisible():
             self.game_card.cancel(fade=True)            # Alt+Tab из игры — карточка тоже плавно гаснет
+        # опрос Ctrl / Ctrl+Alt (двигать текст, закрепить) — только пока идёт игра
+        if in_game and self.cfg.get("game_lyrics", True):
+            if not self.game_lyrics.ctrl_poll.isActive():
+                self.game_lyrics.ctrl_poll.start()
+        elif self.game_lyrics.ctrl_poll.isActive():
+            self.game_lyrics.ctrl_poll.stop()
+            self.game_lyrics._combo = None
+            self.game_lyrics._set_edit(False)
         if not (self.cfg.get("game_lyrics", True) and ly and not self.radio and self.is_playing() and in_game):
             self.game_lyrics.clear()
             return
@@ -2858,7 +2868,7 @@ class Mp3Widget(QWidget):
         i = ly.index_at(pos)
         cur = ly.lines[i] if i >= 0 else ""
         if not cur.strip():                              # до первой строки и в пустых строках — ничего
-            if GameLyrics._ctrl_down():                  # зажали Ctrl, чтобы подвинуть — показать, что двигать
+            if GameLyrics._ctrl_down() and not self.game_lyrics.locked:   # зажали Ctrl, чтобы подвинуть
                 self.game_lyrics.set_lines("♪  ♪  ♪", "", self.title)
                 return
             self.game_lyrics.clear()
@@ -2867,7 +2877,7 @@ class Mp3Widget(QWidget):
         t0 = ly.times[i]
         t1 = ly.times[i + 1] if i + 1 < len(ly) else t0 + 8000
         sing = min(t1 - t0, max(2500, 1200 + 130 * len(cur)), 9000)
-        if pos > t0 + sing and not GameLyrics._ctrl_down():
+        if pos > t0 + sing and not (GameLyrics._ctrl_down() and not self.game_lyrics.locked):
             self.game_lyrics.clear()
             return
         nxt = ly.lines[i + 1] if (i + 1 < len(ly) and t1 - pos < 6000) else ""
@@ -2893,6 +2903,24 @@ class Mp3Widget(QWidget):
             self.game_lyrics.notice("Текст песни: " + ("вкл" if on else "выкл") + "  ·  Ctrl+Alt+G")
             self._game_notice_until = time.monotonic() + 1.6
             QTimer.singleShot(1650, self.game_lyrics.clear)
+
+    def on_game_lyrics_lock(self, locked):
+        """Ctrl+Alt в игре: текст закреплён (Ctrl его больше не двигает) / снова можно двигать."""
+        self.cfg["game_lyrics_locked"] = bool(locked)
+        self.save_later()
+        if hasattr(self, "act_game_lock"):
+            self.act_game_lock.setChecked(bool(locked))
+        self.flash("ТЕКСТ ПОВЕРХ ИГР " + ("ЗАКРЕПЛЁН" if locked else "МОЖНО ДВИГАТЬ (CTRL)"), 2.0)
+        if self._overlay_game_ok():                      # подпись прямо поверх игры
+            self.game_lyrics.opacity = float(self.cfg.get("game_lyrics_opacity", 0.7))
+            self.game_lyrics.notice("🔒 Текст закреплён  ·  Ctrl+Alt — открепить" if locked
+                                    else "🔓 Ctrl + мышь — двигать  ·  Ctrl+Alt — закрепить")
+            self._game_notice_until = time.monotonic() + 1.8
+            QTimer.singleShot(1850, self.game_lyrics.clear)
+
+    def toggle_game_lyrics_lock(self):
+        self.game_lyrics.locked = not self.game_lyrics.locked
+        self.on_game_lyrics_lock(self.game_lyrics.locked)
 
     def reset_game_lyrics_place(self):
         self.cfg.pop("game_lyrics_pos", None)
@@ -4707,6 +4735,10 @@ class Mp3Widget(QWidget):
         self.act_overlay_excl.setToolTip("Обычно окна поверх видны и в «полноэкранном» режиме (Windows выводит игру "
                                          "через рабочий стол).\nЕсли старая игра от этого сворачивается или мигает — "
                                          "выключи: окна будут только для игр «в окне без рамки».")
+        self.act_game_lock = gm.addAction("Закрепить текст (Ctrl его не двигает)   (Ctrl+Alt в игре)",
+                                          self.toggle_game_lyrics_lock)
+        self.act_game_lock.setCheckable(True)
+        self.act_game_lock.setChecked(bool(self.cfg.get("game_lyrics_locked", False)))
         gm.addAction("Вернуть текст на место и в обычный размер", self.reset_game_lyrics_place)
         om = gm.addMenu("Прозрачность текста")
         ogrp = QActionGroup(self)
