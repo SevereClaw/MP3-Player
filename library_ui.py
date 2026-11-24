@@ -1297,6 +1297,10 @@ class NowPlaying(QWidget):
         self.vol_v = None               # показанное значение (плавно догоняет настоящее)
         self.vol_kick = 0.0             # толчок при каждом щелчке колеса (+ громче, − тише)
         self._wheel_acc = 0.0
+        self._lyr_box = QRectF()        # где сейчас нарисован текст песни (колёсико над ним — листать текст)
+        self._man_scroll = None         # куда пролистали текст колёсиком (номер строки)
+        self._man_until = 0.0           # до какого момента держать пролистанное, потом текст вернётся сам
+        self._lyr_wheel_hint = False
         self._mouse_t = 0.0             # когда последний раз двигали мышью над страницей
         # эффекты под бит: обложка «качает», от неё расходятся кольца и летят частицы
         self._accent = QColor(CYAN)     # самый сочный цвет обложки
@@ -1330,7 +1334,8 @@ class NowPlaying(QWidget):
         self.mouse = None
 
     def wheelEvent(self, e):
-        """Колёсико в любом месте страницы — громкость (шаг 5 %)."""
+        """Колёсико над текстом песни — листать текст (Shift + колёсико — скорость текста),
+        в остальных местах страницы — громкость (шаг 5 %)."""
         d = e.angleDelta().y() or e.angleDelta().x()
         if not d:
             return
@@ -1341,6 +1346,27 @@ class NowPlaying(QWidget):
             return
         self._wheel_acc -= steps
         o = self.win.owner
+        lyr = getattr(o, "lyrics", None)
+        if lyr is not None and len(lyr) and self._lyr_box.contains(e.position()):
+            if e.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                speed = getattr(o, "speed_lyrics", None)
+                if callable(speed):
+                    speed(0.05 if steps > 0 else -0.05)
+                    try:
+                        sp = float(o.lyrics_speed() or 1.0)
+                    except Exception:
+                        sp = 1.0
+                    self.win.toast(f"⏱ СКОРОСТЬ ТЕКСТА {int(round(sp * 100))}%")
+                return
+            base = self._man_scroll if (self._man_scroll is not None and time.monotonic() < self._man_until) \
+                else (self.scroll if self.scroll is not None else 0.0)
+            self._man_scroll = max(0.0, min(float(len(lyr) - 1), round(base) - 2 * steps))
+            self._man_until = time.monotonic() + 4.0
+            if not self._lyr_wheel_hint:
+                self._lyr_wheel_hint = True
+                self.win.toast("КОЛЁСИКО — ЛИСТАТЬ ТЕКСТ · SHIFT + КОЛЁСИКО — СКОРОСТЬ ТЕКСТА")
+            self.update()
+            return
         try:
             cur = float(o.player.volume())
         except Exception:
@@ -1488,6 +1514,18 @@ class NowPlaying(QWidget):
         a = m.addAction("📋  Вставить текст песни из буфера", lambda: self.set_lyrics_text(path, clip.text()))
         a.setEnabled(has_txt)
         m.addAction("📄  Текст песни из файла (.lrc, .txt)…", lambda: self.pick_lyrics_file(path))
+        if getattr(o, "lyrics", None) is not None and callable(getattr(o, "speed_lyrics", None)):
+            m.addSeparator()
+            try:
+                sp = float(o.lyrics_speed() or 1.0)
+            except Exception:
+                sp = 1.0
+            m.addAction("⏩  Текст быстрее (+5 %)   Shift + колёсико вверх", lambda: o.speed_lyrics(+0.05))
+            m.addAction("⏪  Текст медленнее (−5 %)   Shift + колёсико вниз", lambda: o.speed_lyrics(-0.05))
+            if abs(sp - 1.0) > 0.001:
+                m.addAction(f"Сбросить скорость (сейчас {int(round(sp * 100))} %)", lambda: o.speed_lyrics(None))
+            m.addAction("◀  Текст раньше на 0,5 с", lambda: o.shift_lyrics(+500))
+            m.addAction("▶  Текст позже на 0,5 с", lambda: o.shift_lyrics(-500))
         m.addSeparator()
         a = m.addAction("📋  Вставить картинку из буфера", lambda: self.set_picture(path, clip.image()))
         a.setEnabled(has_img)
@@ -1936,13 +1974,26 @@ class NowPlaying(QWidget):
             n = len(lyr)
             line_h = 44
             rows = max(1, int(box.height() // line_h))
+            self._lyr_box = QRectF(box)
             # строки плавно «едут» к текущей, а не прыгают
             gliding = now < self._glide_until
             if gliding and now - self._pulse[1] < 0.35 and 0 <= self._pulse[0] < n:
                 i = self._pulse[0]                              # движок ещё перематывает — уже едем к выбранной
-            if self.scroll is None or (abs(self.scroll - i) > 6 and not gliding):
+            # пролистали колёсиком — держим там 4 с, потом плавно возвращаемся к текущей строке
+            man = self._man_scroll if (self._man_scroll is not None and now < self._man_until) else None
+            if man is None and self._man_scroll is not None:
+                self._man_scroll = None
+                self._glide_until = now + 1.4
+                gliding = True
+            if man is not None:
+                if self.scroll is None:
+                    self.scroll = float(i)
+                self.scroll = ease(self.scroll, min(float(n - 1), man), 12.0)
+            elif self.scroll is None or (abs(self.scroll - i) > 6 and not gliding):
                 self.scroll = float(i)
-            if gliding:                                         # плавный разгон и торможение, без рывка в начале
+            if man is not None:
+                pass
+            elif gliding:                                         # плавный разгон и торможение, без рывка в начале
                 dist = float(i) - self.scroll
                 stepv = dist * (1 - math.exp(-dt * 9.0))
                 cap = max(0.6, abs(dist) * 0.9) * dt * 14
@@ -1964,7 +2015,7 @@ class NowPlaying(QWidget):
                         p.setBrush(hv_c)
                         p.drawPolygon(skew_poly(hit.adjusted(0, 3, 0, -3), 12))
                 text = lyr.lines[k] or "♪"
-                fk = max(0.0, 1.0 - abs(k - self.scroll))             # насколько строка «текущая» (0..1)
+                fk = max(0.0, 1.0 - abs(k - (self.scroll if man is None else i)))   # насколько строка «текущая»
                 edge = min(1.0, max(0.0, (yy - box.top() + line_h) / line_h),
                            max(0.0, (box.bottom() - yy) / (line_h * 1.5)))   # мягкое исчезание у краёв
                 # один шрифт, а размер — масштабом: растёт плавно, без скачков по пикселям
@@ -1987,7 +2038,7 @@ class NowPlaying(QWidget):
                     p.setBrush(QColor(255, 255, 255, int(90 * pu * pu * edge)))
                     p.drawPolygon(skew_poly(pb, 12))
                 c = QColor(WHITE)
-                base = max(50, 190 - abs(k - self.scroll) * 35)
+                base = max(50, 190 - abs(k - (self.scroll if man is None else i)) * 35)
                 c.setAlpha(int((base + (255 - base) * fk) * edge))
                 p.save()
                 p.translate(x - 8 + indent, yy + line_h / 2)

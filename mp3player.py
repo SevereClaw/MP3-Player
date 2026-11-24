@@ -934,7 +934,7 @@ class Mp3Widget(QWidget):
             return {}
         # старые версии сохраняли пути вперемешку с / и \\ — привести к одному виду
         try:
-            for k in ("lrc_links", "lrc_offset", "resume", "folder_state"):
+            for k in ("lrc_links", "lrc_offset", "lrc_speed", "resume", "folder_state"):
                 if isinstance(cfg.get(k), dict):
                     cfg[k] = {npath(a): (npath(b) if k == "lrc_links" else b) for a, b in cfg[k].items()}
             for k in ("favorites", "folders", "sources", "lyrics_dirs"):
@@ -5057,9 +5057,33 @@ class Mp3Widget(QWidget):
     def load_lyrics(self, path, title="", artist=""):
         if not path:
             return None
-        return load_for_track(path, self.cfg.get("lrc_links") or {}, self.cfg.get("lyrics_dirs") or [],
-                              title or self.title, artist or self.artist,
-                              int((self.cfg.get("lrc_offset") or {}).get(path, 0)))
+        ly = load_for_track(path, self.cfg.get("lrc_links") or {}, self.cfg.get("lyrics_dirs") or [],
+                            title or self.title, artist or self.artist,
+                            int((self.cfg.get("lrc_offset") or {}).get(path, 0)))
+        k = float((self.cfg.get("lrc_speed") or {}).get(path, 1.0) or 1.0)
+        if ly is not None and len(ly) and abs(k - 1.0) > 0.001:
+            # своя скорость текста: строки сжимаются (быстрее) или растягиваются (медленнее) от первой строки
+            t0 = ly.times[0]
+            ly.times = [int(t0 + (t - t0) / k) for t in ly.times]
+        return ly
+
+    def lyrics_speed(self):
+        return float((self.cfg.get("lrc_speed") or {}).get(self.loaded_path, 1.0) or 1.0) if self.loaded_path else 1.0
+
+    def speed_lyrics(self, delta):
+        """Скорость текста этого трека: +0.05 — строки идут на 5 % быстрее, None — как в файле."""
+        p = self.loaded_path
+        if not p:
+            return
+        sp = self.cfg.setdefault("lrc_speed", {})
+        v = 1.0 if delta is None else min(2.0, max(0.5, round(float(sp.get(p, 1.0)) + delta, 2)))
+        if abs(v - 1.0) > 0.001:
+            sp[p] = v
+        else:
+            sp.pop(p, None)
+        self.reload_lyrics(note=False)
+        self.flash(f"СКОРОСТЬ ТЕКСТА {int(round(v * 100))}%" if abs(v - 1.0) > 0.001 else "СКОРОСТЬ ТЕКСТА КАК В ФАЙЛЕ")
+        self.save_later()
 
     def reload_lyrics(self, note=True):
         p = self.loaded_path
@@ -5529,6 +5553,11 @@ class Mp3Widget(QWidget):
             m.addAction("⏩  Текст позже на 0,5 с", lambda: self.shift_lyrics(-500))
             if off:
                 m.addAction(f"Сбросить сдвиг (сейчас {off / 1000:+.1f} с)", lambda: self.shift_lyrics(None))
+            m.addAction("⏩  Текст быстрее (+5 %)", lambda: self.speed_lyrics(+0.05))
+            m.addAction("⏪  Текст медленнее (−5 %)", lambda: self.speed_lyrics(-0.05))
+            if abs(self.lyrics_speed() - 1.0) > 0.001:
+                m.addAction(f"Сбросить скорость (сейчас {int(round(self.lyrics_speed() * 100))} %)",
+                            lambda: self.speed_lyrics(None))
             m.addSeparator()
         h = m.addAction("Папки с текстами:")
         h.setEnabled(False)
