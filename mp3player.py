@@ -43,6 +43,7 @@ import weekly
 import smart
 import library as libmod
 import mywave as wavemod
+from game_overlay import GameLyrics, GameTrackCard
 import audiofeat
 import fullscreen
 
@@ -835,6 +836,12 @@ class Mp3Widget(QWidget):
         self.cover_popup = CoverPopup()
         self.toast = NowPlayingToast()
         self.toast.clicked.connect(lambda: self.show_player())
+        # поверх игры: строка текста песни и карточка следующего трека (окна насквозь для мыши, без фокуса)
+        self.game_lyrics = GameLyrics()
+        self.game_card = GameTrackCard()
+        self.game_timer = QTimer(self, interval=200)
+        self.game_timer.timeout.connect(self.game_overlay_tick)
+        self.game_timer.start()
         self._announce_until = 0.0
 
         # состояние UI
@@ -2777,8 +2784,56 @@ class Mp3Widget(QWidget):
             elif self.repeat == "off" and self.pos_in_order >= len(self.order) - 1:
                 self.player.stop()
             else:
+                done = self.title
                 self.wave_feedback(+1.0)             # дослушал до конца — волна даёт больше похожего
                 self.step(+1, user=False)
+                # поверх игры — карточка следующего трека; через секунду, когда подтянутся теги и обложка
+                QTimer.singleShot(1200, lambda d=done: self.show_game_card(d))
+
+    # ------------------------------------------------------------ поверх игры
+    def _overlay_game_ok(self):
+        """Игра идёт окном на весь экран — поверх неё можно показать. В «настоящем» полноэкранном
+        Direct3D окно не видно, а попытка показать может свернуть игру — тогда ничего не показываем."""
+        return fullscreen.game_mode() == "window"
+
+    def game_overlay_tick(self):
+        """5 раз в секунду: текущая строка текста песни поверх игры (или спрятать)."""
+        ly = self.lyrics
+        if not (self.cfg.get("game_lyrics", True) and ly and not self.radio and self.is_playing()
+                and self._overlay_game_ok()):
+            self.game_lyrics.clear()
+            return
+        pos = self.player.position() + 150               # строка появляется чуть раньше, как в караоке
+        i = ly.index_at(pos)
+        cur = ly.lines[i] if i >= 0 else ""
+        nxt = ly.lines[i + 1] if i + 1 < len(ly) else ""
+        if not cur.strip() and not nxt.strip():
+            self.game_lyrics.clear()
+            return
+        self.game_lyrics.set_lines(cur, nxt, self.title)
+
+    def show_game_card(self, finished=""):
+        """Трек дослушан — поверх игры на пару секунд карточка того, что играет дальше."""
+        if not (self.cfg.get("game_card", True) and self.loaded_path and not self.radio
+                and self.is_playing() and self._overlay_game_ok()):
+            return
+        self.game_card.show_track(self._cover, self.title, self.artist, finished)
+
+    def toggle_game_lyrics(self):
+        self.cfg["game_lyrics"] = not self.cfg.get("game_lyrics", True)
+        self.act_game_lyrics.setChecked(bool(self.cfg["game_lyrics"]))
+        if not self.cfg["game_lyrics"]:
+            self.game_lyrics.clear()
+        self.save_later()
+        self.flash("ТЕКСТ ПОВЕРХ ИГР: " + ("ВКЛ" if self.cfg["game_lyrics"] else "ВЫКЛ"), 2.0)
+
+    def toggle_game_card(self):
+        self.cfg["game_card"] = not self.cfg.get("game_card", True)
+        self.act_game_card.setChecked(bool(self.cfg["game_card"]))
+        if not self.cfg["game_card"]:
+            self.game_card.cancel()
+        self.save_later()
+        self.flash("КАРТОЧКА ТРЕКА ПОВЕРХ ИГР: " + ("ВКЛ" if self.cfg["game_card"] else "ВЫКЛ"), 2.0)
 
     # ------------------------------------------------------------ повтор A–B
     def ab_cycle(self):
@@ -4450,6 +4505,17 @@ class Mp3Widget(QWidget):
         self.act_toast_games = tm.addAction("Не показывать поверх игр (чтобы не падал FPS)", self.toggle_toast_games)
         self.act_toast_games.setCheckable(True)
         self.act_toast_games.setChecked(bool(self.cfg.get("toast_no_games", True)))
+        gm = view.addMenu("🎮  Поверх игр")
+        gm.setToolTipsVisible(True)
+        self.act_game_lyrics = gm.addAction("Текст песни внизу экрана", self.toggle_game_lyrics)
+        self.act_game_lyrics.setCheckable(True)
+        self.act_game_lyrics.setChecked(bool(self.cfg.get("game_lyrics", True)))
+        self.act_game_card = gm.addAction("Карточка трека после дослушанного (P3R)", self.toggle_game_card)
+        self.act_game_card.setCheckable(True)
+        self.act_game_card.setChecked(bool(self.cfg.get("game_card", True)))
+        for a in (self.act_game_lyrics, self.act_game_card):
+            a.setToolTip("Только для игр в окне на весь экран (без рамки). В полноэкранном режиме Direct3D "
+                         "окна поверх игры не видно.\nВ некоторых играх окно поверх может немного снизить FPS.")
 
         self.act_dc = st_m.addAction("🎮  Показывать в Discord (Music → Discord)", self.toggle_discord_link)
         self.act_dc.setCheckable(True)
@@ -5408,6 +5474,9 @@ class Mp3Widget(QWidget):
         self.cover_popup.hide()
         self.playlist_panel.hide()
         self.toast.hide()
+        self.game_timer.stop()
+        self.game_lyrics.clear()
+        self.game_card.cancel()
         self.tray.hide()
         QApplication.quit()
 
