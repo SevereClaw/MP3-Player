@@ -300,7 +300,9 @@ from PySide6.QtCore import QPoint
 _vol = []
 owner.player.setVolume = lambda v: _vol.append(v)
 for _ in range(2):
-    app.sendEvent(w.now, QWheelEvent(QPointF(600, 300), QPointF(600, 300), QPoint(0, 0), QPoint(0, 120),
+    # над обложкой (над текстом колёсико листает строки)
+    _pc = w.now.cover_rect.center() if not w.now.cover_rect.isEmpty() else QPointF(250, 300)
+    app.sendEvent(w.now, QWheelEvent(_pc, _pc, QPoint(0, 0), QPoint(0, 120),
                                      Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
                                      Qt.ScrollPhase.NoScrollPhase, False))
 print("громкость колёсиком:", _vol)
