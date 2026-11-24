@@ -51,6 +51,23 @@ def _synced(item):
     return t if _TS.search(t) else ""
 
 
+# «инструментал» в названии и его опечатки/сокращения: Instrumental, Istrumental, Instrumantal, Inst.,
+# Instr., Off Vocal, Backing Track, инструментал, минусовка, インスト, オフボーカル, 伴奏.
+# Караоке-версии сюда не входят — под них как раз поют по тексту.
+_INSTRUMENTAL = re.compile(
+    r"(?<![a-zа-яё])(?:i[nm]?s?t?r[ua]m[ae]n?t[ae]?l[a-z]*|inst\.?|instr\.?|off[\s-]*vocal|backing[\s-]*track|"
+    r"no[\s-]*vocals?|без\s*слов|инстр[ау]мм?[еа]нтал[а-яё]*|минусовк[аи]|\(\s*минус\s*\))(?![a-zа-яё])"
+    r"|インスト|オフボーカル|伴奏", re.I)
+
+
+def is_instrumental(title, path=""):
+    """В названии трека (или в имени файла) сказано, что это инструментал — слов нет, текст не ищем."""
+    for s in (title or "", os.path.splitext(os.path.basename(path or ""))[0]):
+        if s and _INSTRUMENTAL.search(s):
+            return True
+    return False
+
+
 def clean_title(title):
     """«01. Песня (Official Video) [HD]» → «Песня» — для повторного поиска."""
     t = re.sub(r"^\s*\d{1,3}\s*[-.)]\s*", "", title or "")
@@ -58,6 +75,8 @@ def clean_title(title):
                " ", t, flags=re.I)
     return re.sub(r"\s{2,}", " ", t).strip()
 
+
+INSTRUMENTAL_WHY = "инструментал — без слов"
 
 # ------------------------------------------------------------------ NetEase Cloud Music
 NE = "https://music.163.com/api"
@@ -224,14 +243,16 @@ def fetch_lyricsify(artist, title):
 
 
 def fetch(artist, title, album="", duration_s=0):
-    """→ (текст LRC или None, пояснение). Сначала lrclib.net, потом lyricsify.com.
-    Оба сайта недоступны (нет сети) — исключение от lrclib, как раньше."""
+    """→ (текст LRC или None, пояснение). Сначала lrclib.net, потом NetEase, потом lyricsify.com.
+    Все недоступны (нет сети) — исключение от lrclib, как раньше."""
+    if is_instrumental(title):
+        return None, INSTRUMENTAL_WHY
     err = None
     try:
         text, why = fetch_lrclib(artist, title, album, duration_s)
     except Exception as e:
         text, why, err = None, "", e
-    if text or why == "инструментал — без слов":
+    if text or why == INSTRUMENTAL_WHY:
         return text, why
     try:
         ne, nwhy = fetch_netease(artist, title, duration_s)

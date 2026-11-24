@@ -2018,7 +2018,14 @@ class NowPlaying(QWidget):
             p.setFont(pfont(18, weight=QFont.Weight.Bold))
             p.setPen(DIM)
             self._line_hits = []
+            o = self.win.owner
+            try:
+                import lyrics_online
+                inst = lyrics_online.is_instrumental(getattr(o, "title", ""), getattr(o, "loaded_path", "") or "")
+            except Exception:
+                inst = False
             p.drawText(box.adjusted(4, 10, 0, 0), Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft,
+                       "🎼 ИНСТРУМЕНТАЛ — БЕЗ СЛОВ" if inst else
                        "ИЩУ ТЕКСТ В ИНТЕРНЕТЕ…" if now < self._lyr_search_until else
                        "ТЕКСТА НЕТ\n\nПравый клик → «Найти текст в интернете»\n"
                        "или вставь свой: скопируй текст → правый клик → «Вставить текст песни»")

@@ -29,6 +29,20 @@ check("нет блока — пусто", L.lyricsify_extract("<html>Just a mome
 _real = L.fetch_lyricsify
 check("без исполнителя — понятная причина", "исполнитель" in _real("", "Song")[1])
 
+# ---------- инструменталы: текст не ищем
+for t in ("Burn My Dread (Clean Instrumental)", "Song (Istrumental)", "Song [Instrumantal]", "Song (Inst.)",
+          "Song (Off Vocal)", "Песня (Инструментал)", "Песня (минусовка)", "曲 (インスト)"):
+    check("инструментал: " + t, L.is_instrumental(t))
+for t in ("Instinct", "Institute of Sound", "Instruments of Death", "Song (Karaoke)", "Минус сорок"):
+    check("не инструментал: " + t, not L.is_instrumental(t))
+check("инструментал по имени файла", L.is_instrumental("", "C:/m/Track (Instrumental).mp3"))
+L_fetch_called = []
+_orig_lrclib = L.fetch_lrclib
+L.fetch_lrclib = lambda *a, **k: L_fetch_called.append(1) or (None, "")
+t, why = L.fetch("Sanim Sheikh", "Burn My Dread (Clean Instrumental)")
+check("инструментал — в интернет не ходим", t is None and why == L.INSTRUMENTAL_WHY and not L_fetch_called, why)
+L.fetch_lrclib = _orig_lrclib
+
 # ---------- NetEase: выбор песни и чистка текста
 songs = [
     {"id": 1, "name": "Other Song", "artists": [{"name": "Someone"}], "duration": 200000},

@@ -5428,6 +5428,11 @@ class Mp3Widget(QWidget):
         path = self.loaded_path
         if not path or self.radio or not self.cfg.get("lyrics", True):
             return
+        if lyrics_online.is_instrumental(self.title, path):     # инструментал — слов нет, искать нечего
+            if manual:
+                self.flash("🎼 ИНСТРУМЕНТАЛ — БЕЗ СЛОВ", 2.5)
+                self.lyr_sig.done.emit(path, "", lyrics_online.INSTRUMENTAL_WHY, manual)
+            return
         if not manual:
             if not self.cfg.get("lyrics_online", True) or self.lyrics is not None:
                 return
