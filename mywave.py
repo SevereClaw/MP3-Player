@@ -21,6 +21,16 @@ FORGOT_DAYS = 30               # столько не звучало — «заб
 CYCLE = ("known", "known", "new", "old")   # «Микс»: два знакомых → новый → забытый
 SEED_BOOST = 120               # «волна от трека»: во столько раз чаще исполнитель, с которого она началась
 ARTIST_GAP = 4                 # один исполнитель — не чаще раза в пять треков
+MIN_TRACK_SEC = 20             # короче — это звуки (уведомления, эффекты), а не песни: волна их не ставит
+
+
+def too_short(it):
+    """Трек короче MIN_TRACK_SEC. Длительность ещё не известна (0 / нет) — не короткий."""
+    try:
+        d = float((it or {}).get("d") or 0)
+    except (TypeError, ValueError):
+        return False
+    return 0 < d < MIN_TRACK_SEC
 
 
 # ------------------------------------------------------------------ настроение сессии
@@ -202,7 +212,7 @@ def pick(items, stats_tracks, favs, dislikes, history, mode="mix", n=20, last_ar
     seed_artist = (mood or {}).get("seed")
     pool = []                                           # [путь, исполнитель, вид, множитель настроения, элемент]
     for p, it in items.items():
-        if os.path.normcase(p) in seen or float(dislikes.get(p, 0) or 0) >= 2:
+        if os.path.normcase(p) in seen or float(dislikes.get(p, 0) or 0) >= 2 or too_short(it):
             continue
         _t, artist, album = libmod.track_view(p, it)[:3]
         ak = libmod.norm(artist)

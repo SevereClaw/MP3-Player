@@ -1445,6 +1445,14 @@ class Mp3Widget(QWidget):
             p = 0
         elif p < 0:
             p = n - 1
+        # в «Моей волне» короткие звуки (уведомления, эффекты по 2 с) пропускаем — они попадали в
+        # очередь из медиатеки; круг ограничен длиной очереди, чтобы не крутиться, если коротко всё
+        if self.cfg.get("smart") == "wave" and not self.radio:
+            step_dir = 1 if delta >= 0 else -1
+            for _ in range(n):
+                if not wavemod.too_short(self.library.items.get(self.files[self.order[p]])):
+                    break
+                p = (p + step_dir) % n
         self.pos_in_order = p
         self.load_current(autoplay=True, fade_ms=self.fade_ms("skip" if user else "auto"))
 

@@ -222,5 +222,17 @@ check("дважды «не то» — навсегда из волны", ban not
 o = mw.pick(items, stats, set(), {}, list(items), "mix", n=10, rng=random.Random(9), today_iso=TODAY)
 check("всё переслушано — круг начинается заново", len(o) == 10)
 
+# ---------- короткие звуки (уведомления, эффекты) волна не ставит
+snd = dict(items)
+shorts = [os.path.normpath(f"/m/sfx/{k}.wav") for k in range(30)]
+for k, p in enumerate(shorts):
+    snd[p] = {"t": f"beep{k}", "a": "SFX", "al": "", "d": 2.0}
+snd[os.path.normpath("/m/new/unknown.mp3")] = {"t": "U", "a": "New", "al": "", "d": 0}
+o = mw.pick(snd, stats, set(), {}, [], "new", n=200, rng=random.Random(5), today_iso=TODAY)
+check("звуки по 2 с в волну не попадают", not set(shorts) & set(o), len(o))
+check("длительность ещё не известна — трек не выкидывается", os.path.normpath("/m/new/unknown.mp3") in o)
+check("короткое — только меньше 20 с", mw.too_short({"d": 2.0}) and mw.too_short({"d": 19.9})
+      and not mw.too_short({"d": 20.0}) and not mw.too_short({}) and not mw.too_short(None))
+
 print("ИТОГ:", "ошибок нет" if not fails else f"ошибки: {fails}")
 sys.exit(1 if fails else 0)
