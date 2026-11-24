@@ -224,7 +224,7 @@ class GameLyrics(_OverlayBase):
             acc = QColor(CYAN)
             acc.setAlpha(int(220 * ease))
             p.setBrush(acc)
-            p.drawPolygon(_slant(band.left() - 11, band.top(), 7, band.height(), 14))
+            p.drawPolygon(_slant(band.left(), band.top(), 5, band.height(), 14))      # голубая кромка плашки
             p.drawPolygon(_skew(QRectF(band.left() + 22, band.bottom() - 3, bw * 0.55, 3), 1.5))
             # сам текст: белый курсив с тонкой голубой тенью
             path = QPainterPath()
@@ -348,7 +348,7 @@ class GameTrackCard(_OverlayBase):
         c = QColor(CYAN)
         c.setAlpha(int(255 * alpha))
         p.setBrush(c)
-        p.drawPolygon(_slant(body.left() - 26, body.top(), 14, body.height(), 46))
+        p.drawPolygon(_slant(body.left(), body.top(), 7, body.height(), 46))      # голубая кромка плашки
         p.drawPolygon(_skew(QRectF(body.left() + 150, body.bottom() - 6, body.width() * 0.62, 6), 3))
 
         # обложка: квадрат в голубой раме, слегка повёрнут — как портреты в меню P3R
@@ -453,7 +453,7 @@ class VolumeBadge(_OverlayBase):
         p.setBrush(bg)
         p.drawPolygon(_skew(body, 18))
         p.setBrush(CYAN)
-        p.drawPolygon(_slant(body.left() - 10, body.top(), 7, body.height(), 18))
+        p.drawPolygon(_slant(body.left(), body.top(), 5, body.height(), 18))      # голубая кромка плашки
         # ярлык «MP3»
         tag = QRectF(body.left() + 22, body.top() + 9, 54, 22)
         p.setBrush(QColor(255, 255, 255, 240))
