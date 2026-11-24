@@ -781,7 +781,9 @@ class Mp3Widget(QWidget):
         self.player.errorOccurred.connect(self.on_error)
         self.player.metaDataChanged.connect(self.on_meta)
         self.player.playbackStateChanged.connect(lambda *_: self.refresh())
-        self.player.positionChanged.connect(lambda *_: self.refresh_screen())
+        # во время игры экран и так перерисовывается по таймеру анимации; от движка — только на паузе
+        # (перемотка), иначе каждое его сообщение о позиции давало лишнюю перерисовку окна
+        self.player.positionChanged.connect(lambda *_: None if self.is_playing() else self.refresh_screen())
         self.player.durationChanged.connect(lambda *_: self.refresh_screen())
 
         self.title = ""
@@ -3604,12 +3606,64 @@ class Mp3Widget(QWidget):
             self._sp_anchor = (pred, now)
         return int(pred)
 
+    def _covered(self):
+        """Плеер не виден: свёрнут или целиком закрыт другим окном (развёрнутая программа, игра).
+        Тогда его не перерисовываем вовсе. Проверка — раз в полсекунды."""
+        now = time.monotonic()
+        last_t, last_v = self.__dict__.get("_cov_cache", (0.0, False))
+        if now - last_t < 0.5:
+            return last_v
+        v = False
+        if self.isMinimized() or not self.isVisible():
+            v = True
+        elif sys.platform == "win32":
+            try:
+                import ctypes
+                from ctypes import wintypes
+                u = ctypes.windll.user32
+                u.GetForegroundWindow.restype = wintypes.HWND
+                fg = u.GetForegroundWindow()
+                if fg:
+                    pid = wintypes.DWORD(0)
+                    u.GetWindowThreadProcessId(fg, ctypes.byref(pid))
+                    cls = ctypes.create_unicode_buffer(64)
+                    u.GetClassNameW(fg, cls, 64)
+                    if pid.value != os.getpid() and cls.value not in ("Progman", "WorkerW", "Shell_TrayWnd"):
+                        fr, mr = wintypes.RECT(), wintypes.RECT()
+                        if (u.GetWindowRect(fg, ctypes.byref(fr))
+                                and u.GetWindowRect(wintypes.HWND(int(self.winId())), ctypes.byref(mr))):
+                            v = (fr.left <= mr.left and fr.top <= mr.top
+                                 and fr.right >= mr.right and fr.bottom >= mr.bottom)
+            except Exception:
+                v = False
+        self._cov_cache = (now, v)
+        return v
+
+    def _anim_busy(self, now):
+        """Что-то на экране плеера движется само: заставка, колпачок, полоски эквалайзера, сообщение."""
+        if self.boot_t0 is not None or self.cap_t != (1.0 if self.cap_open else 0.0) or self.tilted():
+            return True
+        if any(v > 0.004 for v in self.eq_val) or any(v > 0.004 for v in self.eq_peak):
+            return True
+        return False
+
     def on_anim(self):
         now = time.monotonic()
-        want = 16 if (self.lyrics and self.is_playing() and self.isVisible()
-                      and self.cfg.get("lyrics", True)) else 40     # текст песни — 60 кадров/с
+        playing = self.is_playing()
+        covered = self._covered()
+        if covered:
+            want = 500                                       # не видно — только счёт статистики
+        elif self.lyrics and playing and self.cfg.get("lyrics", True):
+            want = 33                                        # караоке — 30 кадров/с
+        elif playing or self._anim_busy(now) or self.underMouse():
+            want = 40
+        else:
+            want = 100                                       # пауза: стоит, только бегущая строка
         if self.anim.interval() != want:
             self.anim.setInterval(want)
+        lib = self.__dict__.get("library_win")
+        self.spectrum.idle = ((covered or not self.cfg.get("eq", True))
+                              and not (lib is not None and lib.isVisible() and not lib.isMinimized()))
         dt = min(0.1, now - self._last_anim)
         self._last_anim = now
         if self.boot_t0 is not None and not self._boot_sound_done and now - self.boot_t0 > 0.3:
@@ -3623,8 +3677,9 @@ class Mp3Widget(QWidget):
             self.cap_t = min(target, self.cap_t + spd) if target > self.cap_t else max(target, self.cap_t - spd)
             if not self.cap_open and self.cap_t == 0.0 and CAP is not None:
                 self.sound("cap_on")
-            self.update()
-        elif self.cap_open and CAP is not None:
+            if not covered:
+                self.update()
+        elif self.cap_open and CAP is not None and not covered:
             self.update()                     # покачивание колпачка
         self.ab_check()
         self.write_nowplaying()
@@ -3642,6 +3697,11 @@ class Mp3Widget(QWidget):
                 if key and not self.radio:            # «Недавно играло» на главной медиатеки
                     rec = [p for p in (self.cfg.get("recent") or []) if p != key]
                     self.cfg["recent"] = ([key] + rec)[:40]
+        if covered:                                          # окно закрыто — рисовать некому
+            if self.cfg.get("eq", True):
+                self.eq_val = [0.0] * EQ_BANDS
+                self.eq_peak = [0.0] * EQ_BANDS
+            return
         if REELS and self.is_playing():
             self.reel_angle = (self.reel_angle + dt * 160) % 360
             self.update()
