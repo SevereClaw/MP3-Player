@@ -840,6 +840,13 @@ class Mp3Widget(QWidget):
         self.toast.clicked.connect(lambda: self.show_player())
         # поверх игры: строка текста песни и карточка следующего трека (окна насквозь для мыши, без фокуса)
         self.game_lyrics = GameLyrics()
+        _gp = self.cfg.get("game_lyrics_pos")
+        if isinstance(_gp, (list, tuple)) and len(_gp) == 2:
+            self.game_lyrics.pos_frac = (float(_gp[0]), float(_gp[1]))
+        self.game_lyrics.set_scale(float(self.cfg.get("game_lyrics_scale", 1.0) or 1.0))
+        self.game_lyrics.moved.connect(lambda fx, fy: (self.cfg.__setitem__("game_lyrics_pos", [round(fx, 4), round(fy, 4)]),
+                                                       self.save_later()))
+        self.game_lyrics.scaled.connect(lambda k: (self.cfg.__setitem__("game_lyrics_scale", k), self.save_later()))
         self.game_card = GameTrackCard()
         self.vol_badge = VolumeBadge()
         self.game_timer = QTimer(self, interval=200)
@@ -2851,13 +2858,16 @@ class Mp3Widget(QWidget):
         i = ly.index_at(pos)
         cur = ly.lines[i] if i >= 0 else ""
         if not cur.strip():                              # до первой строки и в пустых строках — ничего
+            if GameLyrics._ctrl_down():                  # зажали Ctrl, чтобы подвинуть — показать, что двигать
+                self.game_lyrics.set_lines("♪  ♪  ♪", "", self.title)
+                return
             self.game_lyrics.clear()
             return
         # строку не держим весь проигрыш: спели (по длине строки) — плашка пропадает до следующей
         t0 = ly.times[i]
         t1 = ly.times[i + 1] if i + 1 < len(ly) else t0 + 8000
         sing = min(t1 - t0, max(2500, 1200 + 130 * len(cur)), 9000)
-        if pos > t0 + sing:
+        if pos > t0 + sing and not GameLyrics._ctrl_down():
             self.game_lyrics.clear()
             return
         nxt = ly.lines[i + 1] if (i + 1 < len(ly) and t1 - pos < 6000) else ""
@@ -2883,6 +2893,14 @@ class Mp3Widget(QWidget):
             self.game_lyrics.notice("Текст песни: " + ("вкл" if on else "выкл") + "  ·  Ctrl+Alt+G")
             self._game_notice_until = time.monotonic() + 1.6
             QTimer.singleShot(1650, self.game_lyrics.clear)
+
+    def reset_game_lyrics_place(self):
+        self.cfg.pop("game_lyrics_pos", None)
+        self.cfg.pop("game_lyrics_scale", None)
+        self.game_lyrics.pos_frac = None
+        self.game_lyrics.set_scale(1.0)
+        self.save_later()
+        self.flash("ТЕКСТ ПОВЕРХ ИГР — НА МЕСТЕ", 2.0)
 
     def toggle_overlay_exclusive(self):
         self.cfg["overlay_exclusive"] = not self.cfg.get("overlay_exclusive", True)
@@ -4689,6 +4707,7 @@ class Mp3Widget(QWidget):
         self.act_overlay_excl.setToolTip("Обычно окна поверх видны и в «полноэкранном» режиме (Windows выводит игру "
                                          "через рабочий стол).\nЕсли старая игра от этого сворачивается или мигает — "
                                          "выключи: окна будут только для игр «в окне без рамки».")
+        gm.addAction("Вернуть текст на место и в обычный размер", self.reset_game_lyrics_place)
         om = gm.addMenu("Прозрачность текста")
         ogrp = QActionGroup(self)
         self.game_opacity_actions = {}
