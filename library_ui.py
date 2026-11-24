@@ -1301,6 +1301,8 @@ class NowPlaying(QWidget):
         self._man_scroll = None         # куда пролистали текст колёсиком (номер строки)
         self._man_until = 0.0           # до какого момента держать пролистанное, потом текст вернётся сам
         self._lyr_wheel_hint = False
+        self._lyr_line = -1             # текущая строка в прошлом кадре
+        self._line_change_t = 0.0       # когда сменилась строка (пока строки едут — полные 60 кадров)
         self._mouse_t = 0.0             # когда последний раз двигали мышью над страницей
         # эффекты под бит: обложка «качает», от неё расходятся кольца и летят частицы
         self._accent = QColor(CYAN)     # самый сочный цвет обложки
@@ -1975,6 +1977,9 @@ class NowPlaying(QWidget):
             line_h = 44
             rows = max(1, int(box.height() // line_h))
             self._lyr_box = QRectF(box)
+            if i != self._lyr_line:
+                self._lyr_line = i
+                self._line_change_t = now
             # строки плавно «едут» к текущей, а не прыгают
             gliding = now < self._glide_until
             if gliding and now - self._pulse[1] < 0.35 and 0 <= self._pulse[0] < n:
@@ -4081,11 +4086,22 @@ class LibraryWindow(QWidget):
         if self.isMinimized():
             ms, bar = 500, 500
         elif page in (self.now, self.home):
-            if page is self.now and time.monotonic() < max(self.now.vol_until, self.now._glide_until,
-                                                           self.now._mouse_t + 1.0) + 0.5:
-                ms = 16                                     # громкость, переезд текста, мышь над обложкой — 60 кадров
-            else:                                           # само по себе текст и волны идут в 30 кадров
+            nw = self.now
+            lyr = page is nw and playing and getattr(self.owner, "lyrics", None) is not None
+            if page is nw and time.monotonic() < max(nw.vol_until, nw._glide_until, nw._mouse_t + 1.0,
+                                                     nw._line_change_t + 0.9, nw._man_until) + 0.5:
+                ms = 16                     # громкость, смена строки, прокрутка, мышь над обложкой — 60 кадров
+            elif lyr:
+                ms = 33                     # текст песни идёт — 30 кадров, даже если окно не в фокусе (иначе рывками)
+            else:                           # само по себе волны идут в 30 кадров
                 ms = (33 if playing else 50) if active else (100 if playing else 250)
+            if not active and ms < 250:
+                try:
+                    import fullscreen
+                    if fullscreen.game_running():       # окно за игрой — его не видно, не тратим процессор
+                        ms = 250
+                except Exception:
+                    pass
             bar = 33 if (active and playing) else 250
         else:
             ms, bar = 250, (33 if (active and playing) else 250)
