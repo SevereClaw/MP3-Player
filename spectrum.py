@@ -61,6 +61,7 @@ class Spectrum(QObject):
         self.fmt_info = ""
         self.method = ""
         self._last_calc = 0.0
+        self.idle = False            # плеер не виден или эквалайзер выключен — спектр не считаем
         self._outs = []
         try:
             from PySide6.QtMultimedia import QAudioBufferOutput, QMediaPlayer
@@ -110,7 +111,7 @@ class Spectrum(QObject):
         return ctypes.string_at(int(d), n)
 
     def _on_buffer(self, deck, buf):
-        if deck is not self.engine.cur:
+        if self.idle or deck is not self.engine.cur:
             return
         now = time.monotonic()
         if now - self._last_calc < (0.03 if np is not None else 0.06):   # ~30 (или 15) раз в секунду
@@ -135,7 +136,7 @@ class Spectrum(QObject):
             self.last_error = f"{type(e).__name__}: {e}"
 
     def _on_samples(self, deck, mono, sr):
-        if deck is not self.engine.cur:
+        if self.idle or deck is not self.engine.cur:
             return
         now = time.monotonic()
         if now - self._last_calc < 0.03:

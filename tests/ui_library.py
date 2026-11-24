@@ -207,6 +207,19 @@ for k in range(0, len(b), 20000):
     print("SHOTPART", "lib_transition.jpg", k // 20000, b[k:k + 20000], flush=True)
 w.open_album(next(a for a in w.albums if a["title"].startswith("Persona"))); dump("lib_album.jpg")
 w.go("now"); dump("lib_now.jpg")
+from PySide6.QtGui import QWheelEvent                     # колёсико над текстом — листает текст, а не громкость
+from PySide6.QtCore import QPoint as _QP
+w.now.repaint()
+_c = w.now._lyr_box.center()
+_s_before = w.now.scroll
+app.sendEvent(w.now, QWheelEvent(_c, w.now.mapToGlobal(_c), _QP(0, 0), _QP(0, -360), Qt.MouseButton.NoButton,
+                                 Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False))
+for _ in range(25):
+    __import__("time").sleep(0.03); w.now.repaint(); app.processEvents()
+print("WHEEL lyrics scroll:", _s_before, "->", w.now.scroll, "manual", w.now._man_scroll, flush=True)
+assert w.now._man_scroll is not None and w.now.scroll > (_s_before or 0) + 1, "колёсико не листает текст"
+dump("lib_now_scrolled.jpg")
+w.now._man_until = 0                                    # время вышло — текст сам вернётся к текущей строке
 from PySide6.QtGui import QMouseEvent                     # клик по строке текста — плавно доезжает, не прыгает
 from PySide6.QtCore import QEvent
 w.now.repaint()

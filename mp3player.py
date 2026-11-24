@@ -43,7 +43,7 @@ import weekly
 import smart
 import library as libmod
 import mywave as wavemod
-from game_overlay import GameLyrics, GameTrackCard
+from game_overlay import GameLyrics, GameTrackCard, VolumeBadge
 import audiofeat
 import fullscreen
 
@@ -781,7 +781,9 @@ class Mp3Widget(QWidget):
         self.player.errorOccurred.connect(self.on_error)
         self.player.metaDataChanged.connect(self.on_meta)
         self.player.playbackStateChanged.connect(lambda *_: self.refresh())
-        self.player.positionChanged.connect(lambda *_: self.refresh_screen())
+        # во время игры экран и так перерисовывается по таймеру анимации; от движка — только на паузе
+        # (перемотка), иначе каждое его сообщение о позиции давало лишнюю перерисовку окна
+        self.player.positionChanged.connect(lambda *_: None if self.is_playing() else self.refresh_screen())
         self.player.durationChanged.connect(lambda *_: self.refresh_screen())
 
         self.title = ""
@@ -839,6 +841,7 @@ class Mp3Widget(QWidget):
         # поверх игры: строка текста песни и карточка следующего трека (окна насквозь для мыши, без фокуса)
         self.game_lyrics = GameLyrics()
         self.game_card = GameTrackCard()
+        self.vol_badge = VolumeBadge()
         self.game_timer = QTimer(self, interval=200)
         self.game_timer.timeout.connect(self.game_overlay_tick)
         self.game_timer.start()
@@ -931,7 +934,7 @@ class Mp3Widget(QWidget):
             return {}
         # старые версии сохраняли пути вперемешку с / и \\ — привести к одному виду
         try:
-            for k in ("lrc_links", "lrc_offset", "resume", "folder_state"):
+            for k in ("lrc_links", "lrc_offset", "lrc_speed", "resume", "folder_state"):
                 if isinstance(cfg.get(k), dict):
                     cfg[k] = {npath(a): (npath(b) if k == "lrc_links" else b) for a, b in cfg[k].items()}
             for k in ("favorites", "folders", "sources", "lyrics_dirs"):
@@ -2756,6 +2759,35 @@ class Mp3Widget(QWidget):
         self.flash(f"ГРОМКОСТЬ {int(round(v * 100))}%")
         self.save_later()
 
+    def knob_volume(self, cmd):
+        """Ctrl + ползунок/колёсико громкости на клавиатуре — громкость только плеера, по 2 %.
+        Ctrl + «без звука» — выключить звук плеера и вернуть прежнюю громкость."""
+        v = self.player.volume()
+        if cmd == "app_vol_mute":
+            if v > 0.001:
+                self.cfg["knob_unmute"] = round(v, 2)
+                v = 0.0
+            else:
+                v = float(self.cfg.get("knob_unmute", 0.5) or 0.5)
+        else:
+            v = min(1.0, max(0.0, round(v + (0.02 if cmd == "app_vol_up" else -0.02), 2)))
+        self.player.setVolume(v)
+        self.save_later()
+        muted = v <= 0.001
+        self.flash("ЗВУК ВЫКЛЮЧЕН" if muted else f"ГРОМКОСТЬ {int(round(v * 100))}%")
+        lib = self.__dict__.get("library_win")
+        try:
+            if lib is not None and lib.isVisible():
+                lib.bar.vol.blockSignals(True)
+                lib.bar.vol.setValue(int(round(v * 100)))
+                lib.bar.vol.blockSignals(False)
+        except Exception:
+            pass
+        # плеер не на виду (игра, другое окно) — плашка громкости поверх всего
+        if fullscreen.game_mode(0.25) != "exclusive" and (self._covered() or not self.isVisible()
+                                                          or fullscreen.game_mode(0.25) == "window"):
+            self.vol_badge.show_level(v, muted)
+
     def seek_by(self, ms):
         if self.player.duration() > 0:
             self.player.setPosition(max(0, min(self.player.duration() - 500,
@@ -2784,32 +2816,41 @@ class Mp3Widget(QWidget):
             elif self.repeat == "off" and self.pos_in_order >= len(self.order) - 1:
                 self.player.stop()
             else:
-                done = self.title
                 self.wave_feedback(+1.0)             # дослушал до конца — волна даёт больше похожего
-                self.step(+1, user=False)
-                # поверх игры — карточка следующего трека; через секунду, когда подтянутся теги и обложка
-                QTimer.singleShot(1200, lambda d=done: self.show_game_card(d))
+                self.auto_next()
 
     # ------------------------------------------------------------ поверх игры
     def _overlay_game_ok(self):
         """Игра идёт окном на весь экран — поверх неё можно показать. В «настоящем» полноэкранном
         Direct3D окно не видно, а попытка показать может свернуть игру — тогда ничего не показываем."""
-        return fullscreen.game_mode() == "window"
+        return fullscreen.game_mode(0.25) == "window"      # чаще обычного: Alt+Tab заметить сразу
 
     def game_overlay_tick(self):
         """5 раз в секунду: текущая строка текста песни поверх игры (или спрятать)."""
+        if time.monotonic() < self.__dict__.get("_game_notice_until", 0.0):
+            return                                       # сейчас видна подпись «вкл / выкл»
         ly = self.lyrics
-        if not (self.cfg.get("game_lyrics", True) and ly and not self.radio and self.is_playing()
-                and self._overlay_game_ok()):
+        in_game = self._overlay_game_ok()
+        if not in_game and self.game_card.isVisible():
+            self.game_card.cancel(fade=True)            # Alt+Tab из игры — карточка тоже плавно гаснет
+        if not (self.cfg.get("game_lyrics", True) and ly and not self.radio and self.is_playing() and in_game):
             self.game_lyrics.clear()
             return
         pos = self.player.position() + 150               # строка появляется чуть раньше, как в караоке
         i = ly.index_at(pos)
         cur = ly.lines[i] if i >= 0 else ""
-        nxt = ly.lines[i + 1] if i + 1 < len(ly) else ""
-        if not cur.strip() and not nxt.strip():
+        if not cur.strip():                              # до первой строки и в пустых строках — ничего
             self.game_lyrics.clear()
             return
+        # строку не держим весь проигрыш: спели (по длине строки) — плашка пропадает до следующей
+        t0 = ly.times[i]
+        t1 = ly.times[i + 1] if i + 1 < len(ly) else t0 + 8000
+        sing = min(t1 - t0, max(2500, 1200 + 130 * len(cur)), 9000)
+        if pos > t0 + sing:
+            self.game_lyrics.clear()
+            return
+        nxt = ly.lines[i + 1] if (i + 1 < len(ly) and t1 - pos < 6000) else ""
+        self.game_lyrics.opacity = float(self.cfg.get("game_lyrics_opacity", 0.7))
         self.game_lyrics.set_lines(cur, nxt, self.title)
 
     def show_game_card(self, finished=""):
@@ -2821,11 +2862,22 @@ class Mp3Widget(QWidget):
 
     def toggle_game_lyrics(self):
         self.cfg["game_lyrics"] = not self.cfg.get("game_lyrics", True)
-        self.act_game_lyrics.setChecked(bool(self.cfg["game_lyrics"]))
-        if not self.cfg["game_lyrics"]:
-            self.game_lyrics.clear()
+        on = bool(self.cfg["game_lyrics"])
+        self.act_game_lyrics.setChecked(on)
         self.save_later()
-        self.flash("ТЕКСТ ПОВЕРХ ИГР: " + ("ВКЛ" if self.cfg["game_lyrics"] else "ВЫКЛ"), 2.0)
+        self.flash("ТЕКСТ ПОВЕРХ ИГР: " + ("ВКЛ" if on else "ВЫКЛ"), 2.0)
+        self.game_lyrics.clear(fade=False)
+        if self._overlay_game_ok():                      # в игре — короткая подпись прямо поверх неё
+            self.game_lyrics.opacity = float(self.cfg.get("game_lyrics_opacity", 0.7))
+            self.game_lyrics.notice("Текст песни: " + ("вкл" if on else "выкл") + "  ·  Ctrl+Alt+G")
+            self._game_notice_until = time.monotonic() + 1.6
+            QTimer.singleShot(1650, self.game_lyrics.clear)
+
+    def set_game_lyrics_opacity(self, v):
+        self.cfg["game_lyrics_opacity"] = v
+        for val, a in self.game_opacity_actions.items():
+            a.setChecked(abs(val - v) < 0.01)
+        self.save_later()
 
     def toggle_game_card(self):
         self.cfg["game_card"] = not self.cfg.get("game_card", True)
@@ -2834,6 +2886,38 @@ class Mp3Widget(QWidget):
             self.game_card.cancel()
         self.save_later()
         self.flash("КАРТОЧКА ТРЕКА ПОВЕРХ ИГР: " + ("ВКЛ" if self.cfg["game_card"] else "ВЫКЛ"), 2.0)
+
+    # ------------------------------------------------------------ проверка нагрузки на Проводник
+    def check_shell_load(self):
+        """Плеер по очереди выключает свои части и меряет нагрузку explorer.exe — итог в окне."""
+        if self.__dict__.get("_shell_check") is not None:
+            return
+        import diag_shell
+
+        def status(text):
+            self.flash(text.upper(), 5.0)
+            if hasattr(self, "tray") and self.tray.isVisible():
+                self.tray.setToolTip(text[:120])
+
+        def done(report, _res):
+            self._shell_check = None
+            self.update_tray_tip()
+            box = QMessageBox(self)
+            box.setWindowTitle("Нагрузка на Проводник")
+            box.setText(report)
+            box.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            copy = box.addButton("Копировать", QMessageBox.ButtonRole.ActionRole)
+            box.addButton(QMessageBox.StandardButton.Ok)
+            box.exec()
+            if box.clickedButton() is copy:
+                QApplication.clipboard().setText(report)
+
+        QMessageBox.information(self, "Нагрузка на Проводник",
+                                "Плеер на ~25 секунд по очереди спрячет окно, выключит медиапанель Windows, "
+                                "значок в трее и поставит паузу — и померит, когда Проводнику станет легче.\n\n"
+                                "Ничего не трогай это время. Потом всё вернётся как было.")
+        self._shell_check = diag_shell.ShellLoadCheck(self, status, done)
+        self._shell_check.start()
 
     # ------------------------------------------------------------ повтор A–B
     def ab_cycle(self):
@@ -2884,7 +2968,14 @@ class Mp3Widget(QWidget):
             return
         if self.repeat == "off" and self.pos_in_order >= len(self.order) - 1:
             return
+        self.auto_next()
+
+    def auto_next(self):
+        """Трек дослушан (или начался плавный переход к следующему) — дальше, и поверх игры карточка."""
+        done = self.title
         self.step(+1, user=False)
+        # через секунду, когда подтянутся теги и обложка нового трека
+        QTimer.singleShot(1200, lambda d=done: self.show_game_card(d))
 
     def on_error(self, _err, msg=""):
         if self.radio:                              # радио: не листать дальше, а переподключиться
@@ -2947,6 +3038,10 @@ class Mp3Widget(QWidget):
             self.player.setPosition(0)
         elif cmd == "next_folder":
             self.next_folder()
+        elif cmd == "game_lyrics":
+            self.toggle_game_lyrics()
+        elif cmd in ("app_vol_up", "app_vol_down", "app_vol_mute"):
+            self.knob_volume(cmd)
         elif cmd == "next":
             self.step(+1)
         elif cmd == "prev":
@@ -3604,12 +3699,64 @@ class Mp3Widget(QWidget):
             self._sp_anchor = (pred, now)
         return int(pred)
 
+    def _covered(self):
+        """Плеер не виден: свёрнут или целиком закрыт другим окном (развёрнутая программа, игра).
+        Тогда его не перерисовываем вовсе. Проверка — раз в полсекунды."""
+        now = time.monotonic()
+        last_t, last_v = self.__dict__.get("_cov_cache", (0.0, False))
+        if now - last_t < 0.5:
+            return last_v
+        v = False
+        if self.isMinimized() or not self.isVisible():
+            v = True
+        elif sys.platform == "win32":
+            try:
+                import ctypes
+                from ctypes import wintypes
+                u = ctypes.windll.user32
+                u.GetForegroundWindow.restype = wintypes.HWND
+                fg = u.GetForegroundWindow()
+                if fg:
+                    pid = wintypes.DWORD(0)
+                    u.GetWindowThreadProcessId(fg, ctypes.byref(pid))
+                    cls = ctypes.create_unicode_buffer(64)
+                    u.GetClassNameW(fg, cls, 64)
+                    if pid.value != os.getpid() and cls.value not in ("Progman", "WorkerW", "Shell_TrayWnd"):
+                        fr, mr = wintypes.RECT(), wintypes.RECT()
+                        if (u.GetWindowRect(fg, ctypes.byref(fr))
+                                and u.GetWindowRect(wintypes.HWND(int(self.winId())), ctypes.byref(mr))):
+                            v = (fr.left <= mr.left and fr.top <= mr.top
+                                 and fr.right >= mr.right and fr.bottom >= mr.bottom)
+            except Exception:
+                v = False
+        self._cov_cache = (now, v)
+        return v
+
+    def _anim_busy(self, now):
+        """Что-то на экране плеера движется само: заставка, колпачок, полоски эквалайзера, сообщение."""
+        if self.boot_t0 is not None or self.cap_t != (1.0 if self.cap_open else 0.0) or self.tilted():
+            return True
+        if any(v > 0.004 for v in self.eq_val) or any(v > 0.004 for v in self.eq_peak):
+            return True
+        return False
+
     def on_anim(self):
         now = time.monotonic()
-        want = 16 if (self.lyrics and self.is_playing() and self.isVisible()
-                      and self.cfg.get("lyrics", True)) else 40     # текст песни — 60 кадров/с
+        playing = self.is_playing()
+        covered = self._covered()
+        if covered:
+            want = 500                                       # не видно — только счёт статистики
+        elif self.lyrics and playing and self.cfg.get("lyrics", True):
+            want = 33                                        # караоке — 30 кадров/с
+        elif playing or self._anim_busy(now) or self.underMouse():
+            want = 40
+        else:
+            want = 100                                       # пауза: стоит, только бегущая строка
         if self.anim.interval() != want:
             self.anim.setInterval(want)
+        lib = self.__dict__.get("library_win")
+        self.spectrum.idle = ((covered or not self.cfg.get("eq", True))
+                              and not (lib is not None and lib.isVisible() and not lib.isMinimized()))
         dt = min(0.1, now - self._last_anim)
         self._last_anim = now
         if self.boot_t0 is not None and not self._boot_sound_done and now - self.boot_t0 > 0.3:
@@ -3623,8 +3770,9 @@ class Mp3Widget(QWidget):
             self.cap_t = min(target, self.cap_t + spd) if target > self.cap_t else max(target, self.cap_t - spd)
             if not self.cap_open and self.cap_t == 0.0 and CAP is not None:
                 self.sound("cap_on")
-            self.update()
-        elif self.cap_open and CAP is not None:
+            if not covered:
+                self.update()
+        elif self.cap_open and CAP is not None and not covered:
             self.update()                     # покачивание колпачка
         self.ab_check()
         self.write_nowplaying()
@@ -3642,6 +3790,11 @@ class Mp3Widget(QWidget):
                 if key and not self.radio:            # «Недавно играло» на главной медиатеки
                     rec = [p for p in (self.cfg.get("recent") or []) if p != key]
                     self.cfg["recent"] = ([key] + rec)[:40]
+        if covered:                                          # окно закрыто — рисовать некому
+            if self.cfg.get("eq", True):
+                self.eq_val = [0.0] * EQ_BANDS
+                self.eq_peak = [0.0] * EQ_BANDS
+            return
         if REELS and self.is_playing():
             self.reel_angle = (self.reel_angle + dt * 160) % 360
             self.update()
@@ -4507,16 +4660,28 @@ class Mp3Widget(QWidget):
         self.act_toast_games.setChecked(bool(self.cfg.get("toast_no_games", True)))
         gm = view.addMenu("🎮  Поверх игр")
         gm.setToolTipsVisible(True)
-        self.act_game_lyrics = gm.addAction("Текст песни внизу экрана", self.toggle_game_lyrics)
+        self.act_game_lyrics = gm.addAction("Текст песни внизу экрана   (Ctrl+Alt+G)", self.toggle_game_lyrics)
         self.act_game_lyrics.setCheckable(True)
         self.act_game_lyrics.setChecked(bool(self.cfg.get("game_lyrics", True)))
         self.act_game_card = gm.addAction("Карточка трека после дослушанного (P3R)", self.toggle_game_card)
         self.act_game_card.setCheckable(True)
         self.act_game_card.setChecked(bool(self.cfg.get("game_card", True)))
+        om = gm.addMenu("Прозрачность текста")
+        ogrp = QActionGroup(self)
+        self.game_opacity_actions = {}
+        cur_op = float(self.cfg.get("game_lyrics_opacity", 0.7))
+        for val, name in ((0.4, "Почти прозрачный (40 %)"), (0.55, "Прозрачный (55 %)"),
+                          (0.7, "Обычный (70 %)"), (0.9, "Плотный (90 %)")):
+            a = om.addAction(name, lambda _=False, v=val: self.set_game_lyrics_opacity(v))
+            a.setCheckable(True)
+            a.setChecked(abs(val - cur_op) < 0.01)
+            ogrp.addAction(a)
+            self.game_opacity_actions[val] = a
         for a in (self.act_game_lyrics, self.act_game_card):
             a.setToolTip("Только для игр в окне на весь экран (без рамки). В полноэкранном режиме Direct3D "
                          "окна поверх игры не видно.\nВ некоторых играх окно поверх может немного снизить FPS.")
 
+        st_m.addAction("🩺  Почему грузится Проводник? (проверка 25 с)", self.check_shell_load)
         self.act_dc = st_m.addAction("🎮  Показывать в Discord (Music → Discord)", self.toggle_discord_link)
         self.act_dc.setCheckable(True)
         self.assoc_menu = st_m.addMenu("🔗  Открывать музыку в MP3 Плеере")
@@ -4892,9 +5057,33 @@ class Mp3Widget(QWidget):
     def load_lyrics(self, path, title="", artist=""):
         if not path:
             return None
-        return load_for_track(path, self.cfg.get("lrc_links") or {}, self.cfg.get("lyrics_dirs") or [],
-                              title or self.title, artist or self.artist,
-                              int((self.cfg.get("lrc_offset") or {}).get(path, 0)))
+        ly = load_for_track(path, self.cfg.get("lrc_links") or {}, self.cfg.get("lyrics_dirs") or [],
+                            title or self.title, artist or self.artist,
+                            int((self.cfg.get("lrc_offset") or {}).get(path, 0)))
+        k = float((self.cfg.get("lrc_speed") or {}).get(path, 1.0) or 1.0)
+        if ly is not None and len(ly) and abs(k - 1.0) > 0.001:
+            # своя скорость текста: строки сжимаются (быстрее) или растягиваются (медленнее) от первой строки
+            t0 = ly.times[0]
+            ly.times = [int(t0 + (t - t0) / k) for t in ly.times]
+        return ly
+
+    def lyrics_speed(self):
+        return float((self.cfg.get("lrc_speed") or {}).get(self.loaded_path, 1.0) or 1.0) if self.loaded_path else 1.0
+
+    def speed_lyrics(self, delta):
+        """Скорость текста этого трека: +0.05 — строки идут на 5 % быстрее, None — как в файле."""
+        p = self.loaded_path
+        if not p:
+            return
+        sp = self.cfg.setdefault("lrc_speed", {})
+        v = 1.0 if delta is None else min(2.0, max(0.5, round(float(sp.get(p, 1.0)) + delta, 2)))
+        if abs(v - 1.0) > 0.001:
+            sp[p] = v
+        else:
+            sp.pop(p, None)
+        self.reload_lyrics(note=False)
+        self.flash(f"СКОРОСТЬ ТЕКСТА {int(round(v * 100))}%" if abs(v - 1.0) > 0.001 else "СКОРОСТЬ ТЕКСТА КАК В ФАЙЛЕ")
+        self.save_later()
 
     def reload_lyrics(self, note=True):
         p = self.loaded_path
@@ -5263,6 +5452,11 @@ class Mp3Widget(QWidget):
         path = self.loaded_path
         if not path or self.radio or not self.cfg.get("lyrics", True):
             return
+        if lyrics_online.is_instrumental(self.title, path):     # инструментал — слов нет, искать нечего
+            if manual:
+                self.flash("🎼 ИНСТРУМЕНТАЛ — БЕЗ СЛОВ", 2.5)
+                self.lyr_sig.done.emit(path, "", lyrics_online.INSTRUMENTAL_WHY, manual)
+            return
         if not manual:
             if not self.cfg.get("lyrics_online", True) or self.lyrics is not None:
                 return
@@ -5285,10 +5479,12 @@ class Mp3Widget(QWidget):
                 if not text:
                     emit(path, "", why, manual)
                     return
-                saved = lyrics_online.save(text, path, artist, title, album, fallback)
+                src = ("lyricsify.com" if "lyricsify" in why else "music.163.com" if "NetEase" in why
+                       else "lrclib.net")
+                saved = lyrics_online.save(text, path, artist, title, album, fallback, source=src)
                 emit(path, saved, why, manual)
             except Exception as e:
-                emit(path, "", f"нет связи с lrclib.net ({type(e).__name__})", manual)
+                emit(path, "", f"нет связи с сайтами текстов ({type(e).__name__})", manual)
         threading.Thread(target=work, daemon=True).start()
 
     def on_lyrics_online(self, path, lrc, why, manual):
@@ -5299,8 +5495,9 @@ class Mp3Widget(QWidget):
                 misses[pkey(path)] = time.time()
                 while len(misses) > 2000:
                     misses.pop(next(iter(misses)))
+            print("текст из сети:", self.title, "—", why)     # в журнал: почему не нашлось
             if manual:
-                self.flash(("🌐 " + why).upper(), 3.0)
+                self.flash(("🌐 " + why).upper(), 5.0)
             self.save_later()
             return
         misses.pop(pkey(path), None)
@@ -5356,6 +5553,11 @@ class Mp3Widget(QWidget):
             m.addAction("⏩  Текст позже на 0,5 с", lambda: self.shift_lyrics(-500))
             if off:
                 m.addAction(f"Сбросить сдвиг (сейчас {off / 1000:+.1f} с)", lambda: self.shift_lyrics(None))
+            m.addAction("⏩  Текст быстрее (+5 %)", lambda: self.speed_lyrics(+0.05))
+            m.addAction("⏪  Текст медленнее (−5 %)", lambda: self.speed_lyrics(-0.05))
+            if abs(self.lyrics_speed() - 1.0) > 0.001:
+                m.addAction(f"Сбросить скорость (сейчас {int(round(self.lyrics_speed() * 100))} %)",
+                            lambda: self.speed_lyrics(None))
             m.addSeparator()
         h = m.addAction("Папки с текстами:")
         h.setEnabled(False)
@@ -5475,8 +5677,9 @@ class Mp3Widget(QWidget):
         self.playlist_panel.hide()
         self.toast.hide()
         self.game_timer.stop()
-        self.game_lyrics.clear()
+        self.game_lyrics.clear(fade=False)
         self.game_card.cancel()
+        self.vol_badge.hide()
         self.tray.hide()
         QApplication.quit()
 
