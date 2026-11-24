@@ -71,6 +71,7 @@ ly.set_lines("A very long lyric line that just keeps going and going to check ho
 shot("game_lyrics_long.png", ly, settle=0.6)
 ly.set_lines("Burn my dread", "Hey yo", "")
 ly.set_scale(1.4)
+ly.ctrl_poll.stop()                     # в тесте Ctrl никто не держит — опрос сразу выключил бы режим
 ly._set_edit(True)
 shot("game_lyrics_edit.png", ly, settle=0.6)
 print("edit mode accepts mouse:", not ly.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents), "size", ly.width(), ly.height())
