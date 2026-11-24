@@ -130,4 +130,21 @@ poll({0x11}); edit_when_locked = lk.edit
 poll(set())
 print("LOCK events:", events, "| edit on Ctrl:", edit_on_ctrl, "| edit on Ctrl while locked:", edit_when_locked, flush=True)
 assert events == [True] and edit_on_ctrl and not edit_when_locked
+# Ctrl + Shift + колёсико — прозрачность, просто Ctrl + колёсико — размер
+from PySide6.QtGui import QWheelEvent
+from PySide6.QtCore import QPoint, QPointF
+lk.locked = False
+poll({0x11, 0x10})
+ops = []
+lk.opacity_changed.connect(ops.append)
+op0, k0 = lk.opacity, lk.k
+c = QPointF(lk.width() / 2, lk.height() / 2)
+app.sendEvent(lk, QWheelEvent(c, lk.mapToGlobal(c), QPoint(0, 0), QPoint(0, -120), Qt.MouseButton.NoButton,
+                              Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier,
+                              Qt.ScrollPhase.NoScrollPhase, False))
+poll({0x11})
+app.sendEvent(lk, QWheelEvent(c, lk.mapToGlobal(c), QPoint(0, 0), QPoint(0, 120), Qt.MouseButton.NoButton,
+                              Qt.KeyboardModifier.ControlModifier, Qt.ScrollPhase.NoScrollPhase, False))
+print("OPACITY", op0, "->", lk.opacity, ops, "| SCALE", k0, "->", lk.k, flush=True)
+assert lk.opacity < op0 and ops and lk.k > k0
 print("DONE")
