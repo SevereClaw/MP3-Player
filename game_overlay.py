@@ -17,7 +17,6 @@ NAVY2 = QColor("#0b2257")
 CYAN = QColor("#2fd3ff")
 ICE = QColor("#bff4ff")
 WHITE = QColor("#f4f9ff")
-DIM = QColor("#7f98c4")
 FONT = "Segoe UI"
 
 _FLAGS = (Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint
@@ -38,6 +37,21 @@ def _skew(r: QRectF, k=None):
     k = r.height() * 0.35 if k is None else k
     return QPolygonF([QPointF(r.left() + k, r.top()), QPointF(r.right(), r.top()),
                       QPointF(r.right() - k, r.bottom()), QPointF(r.left(), r.bottom())])
+
+
+def _slant(x, top, w, h, k):
+    """Полоса шириной w с тем же наклоном, что у плашки высотой h со сдвигом k (верх смещён вправо)."""
+    return QPolygonF([QPointF(x + k, top), QPointF(x + k + w, top), QPointF(x + w, top + h), QPointF(x, top + h)])
+
+
+def _fit_font(text, width, sizes, **kw):
+    """Самый крупный шрифт из sizes, в который текст помещается целиком (или самый мелкий)."""
+    f = None
+    for px in sizes:
+        f = _font(px, **kw)
+        if QFontMetricsF(f).horizontalAdvance(text) <= width:
+            return f
+    return f
 
 
 def game_screen():
@@ -133,7 +147,7 @@ class GameLyrics(_OverlayBase):
 
         # подложка-полоса: тёмная скошенная, чтобы текст читался на любом кадре игры
         if self.cur:
-            f = _font(38)
+            f = _fit_font(self.cur, W - 160, (38, 34, 30, 27, 24))
             fm = QFontMetricsF(f)
             text = fm.elidedText(self.cur, Qt.TextElideMode.ElideRight, W - 160)
             tw = fm.horizontalAdvance(text)
@@ -148,11 +162,11 @@ class GameLyrics(_OverlayBase):
             acc = QColor(CYAN)
             acc.setAlpha(int(255 * ease))
             p.setBrush(acc)
-            p.drawPolygon(_skew(QRectF(band.left() - 14, band.top(), 18, band.height()), 20))
+            p.drawPolygon(_slant(band.left() - 16, band.top(), 10, band.height(), 20))
             p.drawPolygon(_skew(QRectF(band.left() + 30, band.bottom() - 4, bw * 0.55, 4), 2))
             # сам текст: белый курсив с тонкой голубой тенью
             path = QPainterPath()
-            path.addText(QPointF(x0 + 55, band.top() + 44), f, text)
+            path.addText(QPointF(x0 + 55, band.top() + 30 + (fm.ascent() - fm.descent()) / 2), f, text)
             sh = QColor(CYAN)
             sh.setAlpha(int(110 * ease))
             p.save()
@@ -261,7 +275,7 @@ class GameTrackCard(_OverlayBase):
         c = QColor(CYAN)
         c.setAlpha(int(255 * alpha))
         p.setBrush(c)
-        p.drawPolygon(_skew(QRectF(body.left() - 22, body.top(), 30, body.height()), 46))
+        p.drawPolygon(_slant(body.left() - 26, body.top(), 14, body.height(), 46))
         p.drawPolygon(_skew(QRectF(body.left() + 150, body.bottom() - 6, body.width() * 0.62, 6), 3))
 
         # обложка: квадрат в голубой раме, слегка повёрнут — как портреты в меню P3R
@@ -307,9 +321,10 @@ class GameTrackCard(_OverlayBase):
         p.drawText(tr, Qt.AlignmentFlag.AlignCenter, tag)
 
         # название — крупно, курсивом; исполнитель — голубым
-        f = _font(30)
+        name = self.title or "Без названия"
+        f = _fit_font(name, right - tx, (30, 26, 23, 20))
         fm = QFontMetricsF(f)
-        title = fm.elidedText(self.title or "Без названия", Qt.TextElideMode.ElideRight, right - tx)
+        title = fm.elidedText(name, Qt.TextElideMode.ElideRight, right - tx)
         path = QPainterPath()
         path.addText(QPointF(tx, 104), f, title)
         p.setPen(QPen(QColor(3, 10, 31, int(220 * alpha)), 3))
@@ -322,9 +337,9 @@ class GameTrackCard(_OverlayBase):
             p.drawText(QPointF(tx + 8, 132), QFontMetricsF(af).elidedText(self.artist, Qt.TextElideMode.ElideRight,
                                                                              right - tx - 8))
         if self.done:
-            df = _font(12, weight=QFont.Weight.DemiBold)
+            df = _font(13, weight=QFont.Weight.DemiBold)
             p.setFont(df)
-            p.setPen(QColor(DIM.red(), DIM.green(), DIM.blue(), int(255 * alpha)))
+            p.setPen(QColor(ICE.red(), ICE.green(), ICE.blue(), int(200 * alpha)))
             p.drawText(QPointF(tx + 16, 155), QFontMetricsF(df).elidedText("дослушано: " + self.done,
                                                                               Qt.TextElideMode.ElideRight,
                                                                               right - tx - 30))
