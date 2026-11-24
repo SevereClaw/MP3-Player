@@ -43,7 +43,7 @@ import weekly
 import smart
 import library as libmod
 import mywave as wavemod
-from game_overlay import GameLyrics, GameTrackCard
+from game_overlay import GameLyrics, GameTrackCard, VolumeBadge
 import audiofeat
 import fullscreen
 
@@ -841,6 +841,7 @@ class Mp3Widget(QWidget):
         # поверх игры: строка текста песни и карточка следующего трека (окна насквозь для мыши, без фокуса)
         self.game_lyrics = GameLyrics()
         self.game_card = GameTrackCard()
+        self.vol_badge = VolumeBadge()
         self.game_timer = QTimer(self, interval=200)
         self.game_timer.timeout.connect(self.game_overlay_tick)
         self.game_timer.start()
@@ -2758,6 +2759,35 @@ class Mp3Widget(QWidget):
         self.flash(f"ГРОМКОСТЬ {int(round(v * 100))}%")
         self.save_later()
 
+    def knob_volume(self, cmd):
+        """Ctrl + ползунок/колёсико громкости на клавиатуре — громкость только плеера, по 2 %.
+        Ctrl + «без звука» — выключить звук плеера и вернуть прежнюю громкость."""
+        v = self.player.volume()
+        if cmd == "app_vol_mute":
+            if v > 0.001:
+                self.cfg["knob_unmute"] = round(v, 2)
+                v = 0.0
+            else:
+                v = float(self.cfg.get("knob_unmute", 0.5) or 0.5)
+        else:
+            v = min(1.0, max(0.0, round(v + (0.02 if cmd == "app_vol_up" else -0.02), 2)))
+        self.player.setVolume(v)
+        self.save_later()
+        muted = v <= 0.001
+        self.flash("ЗВУК ВЫКЛЮЧЕН" if muted else f"ГРОМКОСТЬ {int(round(v * 100))}%")
+        lib = self.__dict__.get("library_win")
+        try:
+            if lib is not None and lib.isVisible():
+                lib.bar.vol.blockSignals(True)
+                lib.bar.vol.setValue(int(round(v * 100)))
+                lib.bar.vol.blockSignals(False)
+        except Exception:
+            pass
+        # плеер не на виду (игра, другое окно) — плашка громкости поверх всего
+        if fullscreen.game_mode(0.25) != "exclusive" and (self._covered() or not self.isVisible()
+                                                          or fullscreen.game_mode(0.25) == "window"):
+            self.vol_badge.show_level(v, muted)
+
     def seek_by(self, ms):
         if self.player.duration() > 0:
             self.player.setPosition(max(0, min(self.player.duration() - 500,
@@ -3010,6 +3040,8 @@ class Mp3Widget(QWidget):
             self.next_folder()
         elif cmd == "game_lyrics":
             self.toggle_game_lyrics()
+        elif cmd in ("app_vol_up", "app_vol_down", "app_vol_mute"):
+            self.knob_volume(cmd)
         elif cmd == "next":
             self.step(+1)
         elif cmd == "prev":
@@ -5611,6 +5643,7 @@ class Mp3Widget(QWidget):
         self.game_timer.stop()
         self.game_lyrics.clear(fade=False)
         self.game_card.cancel()
+        self.vol_badge.hide()
         self.tray.hide()
         QApplication.quit()
 

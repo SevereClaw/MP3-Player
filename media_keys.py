@@ -177,6 +177,10 @@ HOTKEYS = [  # (id, модификаторы, клавиша, команда, п
     (18, MOD_CONTROL | MOD_ALT, ord("T"), "tags", "Ctrl+Alt+T — теги текущего трека"),
     (19, MOD_CONTROL | MOD_ALT, ord("O"), "library", "Ctrl+Alt+O — медиатека (альбомы, исполнители)"),
     (20, MOD_CONTROL | MOD_ALT, ord("G"), "game_lyrics", "Ctrl+Alt+G — текст песни поверх игры: вкл / выкл"),
+    # колёсико / ползунок громкости на клавиатуре с Ctrl — громкость только плеера (без Ctrl — вся система)
+    (25, MOD_CONTROL, 0xAF, "app_vol_up", "Ctrl + громкость ↑ на клавиатуре — громче только плеер"),
+    (26, MOD_CONTROL, 0xAE, "app_vol_down", "Ctrl + громкость ↓ на клавиатуре — тише только плеер"),
+    (27, MOD_CONTROL, 0xAD, "app_vol_mute", "Ctrl + «без звука» на клавиатуре — выключить / включить звук плеера"),
 ]
 # Запасной вариант: если системные медиа-сессии недоступны, ловим медиа-клавиши сами
 MEDIA_FALLBACK = [
@@ -232,7 +236,8 @@ class GlobalHotkeys(QObject):
         for hid, mod, vk, cmd, label in table:
             if hid in self.registered:
                 continue
-            if self._u.RegisterHotKey(None, hid, mod | MOD_NOREPEAT, vk):
+            norepeat = 0 if vk in (0xAF, 0xAE) else MOD_NOREPEAT      # ползунок громкости шлёт нажатия очередью
+            if self._u.RegisterHotKey(None, hid, mod | norepeat, vk):
                 self.registered[hid] = cmd
             elif label:
                 self.failed.append(label)

@@ -417,3 +417,62 @@ class GameTrackCard(_OverlayBase):
                                                                               Qt.TextElideMode.ElideRight,
                                                                               right - tx - 30))
         p.end()
+
+
+# =====================================================================================
+class VolumeBadge(_OverlayBase):
+    """Плашка громкости плеера (Ctrl + ползунок громкости): «MP3» и полоса из скошенных делений.
+    Видна поверх всего, клики насквозь, через секунду с небольшим гаснет."""
+    W, H = 300, 74
+    HOLD_MS = 1300
+
+    def __init__(self):
+        super().__init__()
+        self.setFixedSize(self.W, self.H)
+        self.level = 0.0
+        self.muted = False
+        self.hide_timer = QTimer(self, singleShot=True)
+        self.hide_timer.timeout.connect(lambda: self.fade_out(320))
+
+    def show_level(self, level, muted=False):
+        self.level, self.muted = max(0.0, min(1.0, float(level))), bool(muted)
+        g = game_screen().geometry()
+        self.move(g.x() + g.width() - self.W - int(g.width() * 0.03), g.y() + int(g.height() * 0.06))
+        self.fade_in(160)
+        self.update()
+        self.hide_timer.start(self.HOLD_MS)
+
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        body = QRectF(14, 8, self.W - 22, self.H - 16)
+        bg = QColor(NAVY)
+        bg.setAlpha(215)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(bg)
+        p.drawPolygon(_skew(body, 18))
+        p.setBrush(CYAN)
+        p.drawPolygon(_slant(body.left() - 10, body.top(), 7, body.height(), 18))
+        # ярлык «MP3»
+        tag = QRectF(body.left() + 22, body.top() + 9, 54, 22)
+        p.setBrush(QColor(255, 255, 255, 240))
+        p.drawPolygon(_skew(tag, 7))
+        p.setFont(_font(14))
+        p.setPen(NAVY)
+        p.drawText(tag, Qt.AlignmentFlag.AlignCenter, "MP3")
+        # число
+        p.setFont(_font(22))
+        p.setPen(QColor(255, 120, 140) if self.muted else WHITE)
+        txt = "ВЫКЛ" if self.muted else f"{int(round(self.level * 100))}%"
+        p.drawText(QRectF(tag.right() + 8, body.top() + 2, 120, 34),
+                   Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, txt)
+        # полоса из 20 скошенных делений
+        n, x0, y0, w, h, gap = 20, body.left() + 26, body.bottom() - 20, 9.0, 11.0, 2.4
+        lit = 0 if self.muted else int(round(self.level * n))
+        p.setPen(Qt.PenStyle.NoPen)
+        for i in range(n):
+            c = QColor(CYAN) if i < lit else QColor(255, 255, 255, 45)
+            p.setBrush(c)
+            p.drawPolygon(_slant(x0 + i * (w + gap), y0, w, h, 3))
+        p.end()
