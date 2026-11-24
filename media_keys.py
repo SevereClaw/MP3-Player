@@ -176,6 +176,7 @@ HOTKEYS = [  # (id, модификаторы, клавиша, команда, п
     (17, MOD_CONTROL | MOD_ALT, ord("B"), "search", "Ctrl+Alt+B — поиск по всей музыке"),
     (18, MOD_CONTROL | MOD_ALT, ord("T"), "tags", "Ctrl+Alt+T — теги текущего трека"),
     (19, MOD_CONTROL | MOD_ALT, ord("O"), "library", "Ctrl+Alt+O — медиатека (альбомы, исполнители)"),
+    (20, MOD_CONTROL | MOD_ALT, ord("G"), "game_lyrics", "Ctrl+Alt+G — текст песни поверх игры: вкл / выкл"),
 ]
 # Запасной вариант: если системные медиа-сессии недоступны, ловим медиа-клавиши сами
 MEDIA_FALLBACK = [
