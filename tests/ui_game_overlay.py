@@ -75,7 +75,28 @@ ly.ctrl_poll.stop()                     # в тесте Ctrl никто не д�
 ly._set_edit(True)
 shot("game_lyrics_edit.png", ly, settle=0.6)
 print("edit mode accepts mouse:", not ly.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents), "size", ly.width(), ly.height())
+# Windows сама решает, кому достаётся клик: окно под точкой (WindowFromPoint) — наше только в режиме Ctrl
+import ctypes
+from ctypes import wintypes
+ly.setWindowOpacity(1.0)
+ly.move(200, 200)
+for _ in range(10):
+    app.processEvents(); time.sleep(0.03)
+u = ctypes.windll.user32
+u.WindowFromPoint.restype = wintypes.HWND
+c = ly.frameGeometry().center()
+ratio = ly.devicePixelRatioF()
+pt = wintypes.POINT(int(c.x() * ratio), int(c.y() * ratio))
+own = int(ly.winId())
+def under():
+    h = u.WindowFromPoint(pt)
+    return int(h or 0)
+hit_edit = under() == own
 ly._set_edit(False)
+for _ in range(5):
+    app.processEvents(); time.sleep(0.02)
+hit_normal = under() == own
+print("HIT with Ctrl:", hit_edit, "| HIT without Ctrl:", hit_normal, flush=True)
 ly.set_scale(1.0)
 ly.clear(fade=False)
 
