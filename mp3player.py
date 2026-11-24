@@ -849,6 +849,8 @@ class Mp3Widget(QWidget):
         self.game_lyrics.scaled.connect(lambda k: (self.cfg.__setitem__("game_lyrics_scale", k), self.save_later()))
         self.game_lyrics.locked = bool(self.cfg.get("game_lyrics_locked", False))
         self.game_lyrics.lock_toggled.connect(self.on_game_lyrics_lock)
+        self.game_lyrics.opacity = float(self.cfg.get("game_lyrics_opacity", 0.7))
+        self.game_lyrics.opacity_changed.connect(self.on_game_lyrics_opacity)
         self.game_card = GameTrackCard()
         self.vol_badge = VolumeBadge()
         self.game_timer = QTimer(self, interval=200)
@@ -2936,8 +2938,18 @@ class Mp3Widget(QWidget):
         self.save_later()
         self.flash("ПОВЕРХ ПОЛНОЭКРАННЫХ ИГР: " + ("ДА" if self.cfg["overlay_exclusive"] else "НЕТ"), 2.0)
 
+    def on_game_lyrics_opacity(self, v):
+        """Ctrl + Shift + колёсико над текстом в игре — запомнить прозрачность и отметить в меню."""
+        self.cfg["game_lyrics_opacity"] = v
+        for val, a in getattr(self, "game_opacity_actions", {}).items():
+            a.setChecked(abs(val - v) < 0.01)
+        self.save_later()
+
     def set_game_lyrics_opacity(self, v):
         self.cfg["game_lyrics_opacity"] = v
+        self.game_lyrics.opacity = v
+        if self.game_lyrics.isVisible() and not self.game_lyrics._fading_out:
+            self.game_lyrics.setWindowOpacity(self.game_lyrics.target_opacity())
         for val, a in self.game_opacity_actions.items():
             a.setChecked(abs(val - v) < 0.01)
         self.save_later()
@@ -4742,6 +4754,7 @@ class Mp3Widget(QWidget):
         gm.addAction("Вернуть текст на место и в обычный размер", self.reset_game_lyrics_place)
         om = gm.addMenu("Прозрачность текста")
         ogrp = QActionGroup(self)
+        ogrp.setExclusionPolicy(QActionGroup.ExclusionPolicy.ExclusiveOptional)   # Ctrl+Shift+колёсико даёт и другие значения
         self.game_opacity_actions = {}
         cur_op = float(self.cfg.get("game_lyrics_opacity", 0.7))
         for val, name in ((0.4, "Почти прозрачный (40 %)"), (0.55, "Прозрачный (55 %)"),

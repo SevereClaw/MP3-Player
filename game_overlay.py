@@ -152,6 +152,7 @@ class GameLyrics(_OverlayBase):
     moved = Signal(float, float)         # центр окна в долях экрана (0..1) — после перетаскивания
     scaled = Signal(float)               # новый размер (1.0 — обычный) — после Ctrl + колёсико
     lock_toggled = Signal(bool)          # Ctrl+Alt: закрепили / открепили
+    opacity_changed = Signal(float)      # Ctrl+Shift + колёсико: новая прозрачность (0.2..1)
 
     def __init__(self):
         super().__init__()
@@ -274,7 +275,16 @@ class GameLyrics(_OverlayBase):
     def wheelEvent(self, e):
         if not self.edit:
             return
-        d = e.angleDelta().y() or e.angleDelta().x()
+        d = e.angleDelta().y() or e.angleDelta().x()        # с Shift Qt часто отдаёт колёсико как горизонтальное
+        if d and (e.modifiers() & Qt.KeyboardModifier.ShiftModifier or self._key(0x10)):
+            # Ctrl + Shift + колёсико — прозрачность (вверх — плотнее, вниз — прозрачнее)
+            self.opacity = max(0.2, min(1.0, round(self.opacity + (0.05 if d > 0 else -0.05), 2)))
+            self.fade.stop()
+            self.setWindowOpacity(self.target_opacity())
+            self.update()
+            self.opacity_changed.emit(self.opacity)
+            e.accept()
+            return
         if d:
             c = self.frameGeometry().center()
             self.set_scale(self.k + (0.1 if d > 0 else -0.1))
@@ -347,7 +357,8 @@ class GameLyrics(_OverlayBase):
             p.setFont(_font(11, italic=False, weight=QFont.Weight.Bold))
             p.setPen(ICE)
             p.drawText(QRectF(8, -1, W - 16, 12), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                       f"Ctrl + мышь — двигать  ·  Ctrl + колёсико — размер ({int(round(self.k * 100))} %)")
+                       f"Ctrl+мышь — двигать · Ctrl+колёсико — размер {int(round(self.k * 100))}% · "
+                       f"Ctrl+Shift+колёсико — прозрачность {int(round(self.opacity * 100))}%")
 
         # подложка-полоса: тёмная скошенная, чтобы текст читался на любом кадре игры
         if self.cur:
